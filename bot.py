@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 import os
-import asyncio
 import json
+import asyncio
+import aiohttp
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ParseMode
 from aiogram.utils import executor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 
 # === Конфигурация ===
@@ -20,42 +20,20 @@ bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher(bot)
 scheduler = AsyncIOScheduler()
 active_polls = {}
-
 STATS_FILE = "stats.json"
-player_stats = {}
 
-# === Функции работы со статистикой ===
+# === Загрузка статистики ===
 def load_stats():
-    global player_stats
     if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, "r", encoding="utf-8") as f:
-                player_stats = json.load(f)
-            print(f"[📊] Загружено {len(player_stats)} записей статистики.")
-        except Exception as e:
-            print(f"[warning] Ошибка загрузки статистики: {e}")
-            player_stats = {}
-    else:
-        player_stats = {}
+        with open(STATS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
 
-def save_stats():
-    try:
-        with open(STATS_FILE, "w", encoding="utf-8") as f:
-            json.dump(player_stats, f, ensure_ascii=False, indent=2)
-        print("[💾] Статистика сохранена в stats.json")
-    except Exception as e:
-        print(f"[error] Ошибка сохранения статистики: {e}")
+def save_stats(data):
+    with open(STATS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-# === Очистка старых апдейтов ===
-async def reset_updates():
-    try:
-        updates = await bot.get_updates()
-        if updates:
-            last = updates[-1].update_id
-            await bot.get_updates(offset=last + 1)
-        print("Updates were skipped successfully.")
-    except Exception as e:
-        print(f"[warning] Не удалось очистить апдейты: {e}")
+stats = load_stats()
 
 # === Настройки опросов ===
 polls_config = [
@@ -64,14 +42,14 @@ polls_config = [
         "time_poll": "10:00",
         "time_game": "20:00",
         "question": "Сегодня собираемся на песчанке в 20:00?",
-        "options": ["Да ✅", "Нет ❌", "Под вопросом 🤔"]
+        "options": ["Да ✅", "Нет ❌", "Под вопросом 🤔, отвечу позже"]
     },
     {
         "day": "thu",
         "time_poll": "10:00",
         "time_game": "20:00",
         "question": "Сегодня собираемся на песчанке в 20:00?",
-        "options": ["Да ✅", "Нет ❌", "Под вопросом 🤔"]
+        "options": ["Да ✅", "Нет ❌", "Под вопросом 🤔, отвечу позже"]
     },
     {
         "day": "fri",
@@ -83,113 +61,165 @@ polls_config = [
 ]
 
 # === Служебные функции ===
+async def reset_updates():
+    try:
+        updates = await bot.get_updates()
+        if updates:
+            last = updates[-1].update_id
+            await bot.get_updates(offset=last + 1)
+        print("[✅ Апдейты очищены]")
+    except Exception as e:
+        print(f"[⚠️] Не удалось очистить апдейты: {e}")
+
 async def start_poll(poll):
     try:
         msg = await bot.send_poll(
             chat_id=CHAT_ID,
             question=poll["question"],
             options=poll["options"],
-            is_anonymous=False,
-            allows_multiple_answers=False
+            is_anonymous=False
         )
-        active_polls[msg.message_id] = {"poll": poll, "answers": {}}
+        active_polls[msg.poll.id] = {
+            "message_id": msg.message_id,
+            "poll": poll,
+            "votes": {}
+        }
         print(f"[{datetime.now():%H:%M:%S}] 🗳 Опрос запущен: {poll['question']}")
-        await bot.pin_chat_message(CHAT_ID, msg.message_id, disable_notification=False)
     except Exception as e:
-        print(f"[error] Ошибка при запуске опроса: {e}")
+        print(f"[❌ Ошибка при запуске опроса: {e}]")
 
-async def send_summary(poll):
-    poll_id = next((m for m, p in active_polls.items() if p["poll"] == poll), None)
-    if not poll_id:
-        return
-    try:
-        poll_data = active_polls[poll_id]
-        answers = poll_data["answers"]
-        yes_voters = [u for u, ans in answers.items() if ans == "Да ✅"]
-        no_voters = [u for u, ans in answers.items() if ans == "Нет ❌"]
-        maybe_voters = [u for u, ans in answers.items() if ans == "Под вопросом 🤔"]
-
-        summary_text = f"📊 <b>Сводка по опросу:</b>\n{poll['question']}\n\n"
-        summary_text += f"✅ <b>Да ({len(yes_voters)}):</b> {', '.join(yes_voters) or '—'}\n"
-        summary_text += f"❌ <b>Нет ({len(no_voters)}):</b> {', '.join(no_voters) or '—'}\n"
-        summary_text += f"🤔 <b>Под вопросом ({len(maybe_voters)}):</b> {', '.join(maybe_voters) or '—'}"
-
-        await bot.send_message(CHAT_ID, summary_text, parse_mode="HTML")
-
-        # обновляем статистику
-        for user in yes_voters:
-            player_stats[user] = player_stats.get(user, 0) + 1
-        save_stats()  # сохраняем статистику после каждого завершения опроса
-
-        del active_polls[poll_id]
-        print(f"[{datetime.now():%H:%M:%S}] 📊 Сводка отправлена и статистика обновлена.")
-    except Exception as e:
-        print(f"[error] Ошибка при отправке сводки: {e}")
-
-# === Обработка ответов пользователей ===
 @dp.poll_answer_handler()
 async def handle_poll_answer(poll_answer: types.PollAnswer):
-    user_name = poll_answer.user.full_name
-    answer = poll_answer.option_ids[0]
-    for poll_id, data in active_polls.items():
-        if poll_answer.poll_id == data.get("poll_id", poll_id):
-            options = data["poll"]["options"]
-            selected = options[answer]
-            data["answers"][user_name] = selected
-            print(f"[vote] {user_name} -> {selected}")
-            break
+    user_id = str(poll_answer.user.id)
+    username = poll_answer.user.first_name or "Без имени"
+    poll_id = poll_answer.poll_id
+    if poll_id in active_polls:
+        option = active_polls[poll_id]["poll"]["options"][poll_answer.option_ids[0]]
+        active_polls[poll_id]["votes"][user_id] = {
+            "name": username,
+            "answer": option
+        }
+
+async def send_summary(poll):
+    poll_entry = next((v for v in active_polls.values() if v["poll"] == poll), None)
+    if not poll_entry:
+        print(f"[info] Нет активного опроса для '{poll['question']}'")
+        return
+
+    poll_id = poll_entry["poll"]
+    votes = poll_entry["votes"]
+    yes_votes = [v["name"] for v in votes.values() if "Да" in v["answer"]]
+
+    text = f"<b>📊 Итоги опроса:</b>\n{poll['question']}\n\n" \
+           f"✅ <b>Придут:</b> {len(yes_votes)}\n" \
+           + "\n".join(f"— {name}" for name in yes_votes) if yes_votes else "— Никто не записался 😅"
+
+    try:
+        await bot.send_message(CHAT_ID, text, parse_mode="HTML")
+        print(f"[{datetime.now():%H:%M:%S}] 📊 Сводка отправлена.")
+    except Exception as e:
+        print(f"[❌ Ошибка при отправке сводки: {e}")
+
+    # Обновляем статистику
+    for uid, v in votes.items():
+        if "Да" in v["answer"]:
+            stats[uid] = stats.get(uid, {"name": v["name"], "count": 0})
+            stats[uid]["count"] += 1
+    save_stats(stats)
+
+async def keep_alive():
+    url = os.getenv("KEEPALIVE_URL")
+    if not url:
+        return
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.get(url)
+            print(f"[{datetime.now():%H:%M:%S}] 🌐 Keep-alive ping sent")
+        except Exception as e:
+            print(f"[⚠️ KeepAlive Error]: {e}")
+        await asyncio.sleep(59 * 60)
+
+def schedule_polls():
+    scheduler.remove_all_jobs()
+    for poll in polls_config:
+        tp = list(map(int, poll["time_poll"].split(":")))
+        tg = list(map(int, poll["time_game"].split(":")))
+        scheduler.add_job(lambda p=poll: asyncio.create_task(start_poll(p)),
+                          trigger="cron", day_of_week=poll["day"],
+                          hour=tp[0], minute=tp[1], id=f"poll_{poll['day']}", replace_existing=True)
+        scheduler.add_job(lambda p=poll: asyncio.create_task(send_summary(p)),
+                          trigger="cron", day_of_week=poll["day"],
+                          hour=max(tg[0]-1, 0), minute=tg[1],
+                          id=f"summary_{poll['day']}", replace_existing=True)
+    print("[✅ Планировщик заданий обновлён]")
 
 # === Команды ===
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.reply("⛔ У вас нет прав для управления ботом.")
+        return
     schedule_polls()
     if not scheduler.running:
         scheduler.start()
-    await message.reply("✅ Бот активирован и работает 24/7!\n"
-                        "Опросы создаются автоматически в назначенные дни.\n"
-                        "Команда /poll tue|thu|fri — запустить вручную.\n"
-                        "Команда /stats — показать статистику игроков.")
+    await message.reply("✅ Бот активирован!\nПланировщик запущен и работает 24/7.\n"
+                        "Команда /summary — показать активные опросы.")
+    print(f"[{datetime.now():%H:%M:%S}] /start от {message.from_user.id}")
 
 @dp.message_handler(commands=["poll"])
 async def manual_poll(message: types.Message):
-    args = message.get_args().strip().lower()
-    poll = next((p for p in polls_config if p["day"] == args), None)
-    if not poll:
-        await message.reply("⚙️ Укажи день: /poll tue | /poll thu | /poll fri")
+    if message.from_user.id != ADMIN_ID:
+        await message.reply("⛔ У вас нет прав для этой команды.")
         return
+
+    args = message.get_args().strip().lower()
+    if args not in ["tue", "thu", "fri"]:
+        await message.reply("⚙️ Укажите день: /poll tue | /poll thu | /poll fri")
+        return
+
+    mapping = {"tue": "вторник", "thu": "четверг", "fri": "субботу"}
+    poll = next((p for p in polls_config if p["day"] == args), None)
     await start_poll(poll)
-    await message.reply(f"✅ Опрос на {args.upper()} запущен вручную.")
+    await message.answer(f"✅ Опрос на {mapping[args]} запущен вручную.")
+
+@dp.message_handler(commands=["summary"])
+async def cmd_summary(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.reply("⛔ Нет прав.")
+        return
+    if not active_polls:
+        await message.reply("📭 Нет активных опросов.")
+        return
+    for entry in active_polls.values():
+        await send_summary(entry["poll"])
 
 @dp.message_handler(commands=["stats"])
 async def cmd_stats(message: types.Message):
-    if not player_stats:
-        await message.reply("📉 Пока нет статистики.")
+    if not stats:
+        await message.reply("📊 Пока нет данных для статистики.")
         return
-    sorted_players = sorted(player_stats.items(), key=lambda x: x[1], reverse=True)
-    top = "\n".join([f"{i+1}. {u} — {c} ⚽" for i, (u, c) in enumerate(sorted_players[:5])])
-    await message.reply(f"🏆 <b>Топ-5 по посещаемости:</b>\n{top}", parse_mode="HTML")
 
-# === Планировщик опросов ===
-def schedule_polls():
-    scheduler.remove_all_jobs()
-    for poll in polls_config:
-        hour, minute = map(int, poll["time_poll"].split(":"))
-        scheduler.add_job(lambda p=poll: asyncio.run_coroutine_threadsafe(start_poll(p), asyncio.get_event_loop()),
-                          trigger="cron", day_of_week=poll["day"], hour=hour, minute=minute)
-        tg_hour, tg_minute = map(int, poll["time_game"].split(":"))
-        scheduler.add_job(lambda p=poll: asyncio.run_coroutine_threadsafe(send_summary(p), asyncio.get_event_loop()),
-                          trigger="cron", day_of_week=poll["day"], hour=max(tg_hour - 1, 0), minute=tg_minute)
-    # Keep-alive ping каждые 59 минут
-    scheduler.add_job(lambda: asyncio.run_coroutine_threadsafe(bot.get_me(), asyncio.get_event_loop()),
-                      trigger=IntervalTrigger(minutes=59))
-    print("[✅ Планировщик заданий обновлён]")
+    top = sorted(stats.values(), key=lambda x: x["count"], reverse=True)[:5]
+    text = "<b>🏆 Топ-5 игроков по посещаемости:</b>\n\n"
+    for i, p in enumerate(top, 1):
+        text += f"{i}. {p['name']} — <b>{p['count']}</b> ⚽\n"
+    await message.reply(text, parse_mode="HTML")
 
-# === Запуск ===
-async def on_startup(dp):
-    load_stats()
+@dp.message_handler(commands=["help"])
+async def cmd_help(message: types.Message):
+    await message.reply("⚙️ Команды:\n"
+                        "/stats — показать топ-5 по посещаемости\n"
+                        "/start — запустить бота (только для админа)\n"
+                        "/poll tue|thu|fri — запустить опрос вручную (только админ)\n"
+                        "/summary — сводка опросов (только админ)")
+
+# === Основной запуск ===
+async def on_startup(_):
     await reset_updates()
     schedule_polls()
     scheduler.start()
+    asyncio.create_task(keep_alive())
     print("[🚀 Бот запущен и работает автономно]")
     try:
         await bot.send_message(ADMIN_ID, "✅ Бот запущен и планировщик активирован!")
@@ -197,8 +227,8 @@ async def on_startup(dp):
         pass
 
 if __name__ == "__main__":
-    print("[start] Bot is starting...")
     executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
+
 
 
 
