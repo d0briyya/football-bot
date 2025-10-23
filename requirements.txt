@@ -1,5 +1,6 @@
 aiogram==2.25.1
 apscheduler==3.11.0
 python-dotenv==1.1.1
-pip install colorlog
-
+colorlog==6.8.2
+aiohttp
+pytz
