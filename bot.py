@@ -28,12 +28,10 @@ dp = Dispatcher(bot)
 kaliningrad_tz = timezone("Europe/Kaliningrad")
 scheduler = AsyncIOScheduler(timezone=kaliningrad_tz)
 
-# структура:
-# active_polls: { poll_id(str): { "message_id": int, "poll": {...}, "votes": {uid_or_manual: {"name": str, "answer": str}}, "active": bool } }
 active_polls = {}
 stats = {}
 
-# === Настройки опросов по расписанию ===
+# === Настройки опросов ===
 polls_config = [
     {"day": "tue", "time_poll": "09:00", "time_game": "20:00",
      "question": "Сегодня собираемся на песчанке в 20:00?",
@@ -46,7 +44,7 @@ polls_config = [
      "options": ["Да ✅", "Нет ❌"]}
 ]
 
-# === Сохранение / загрузка данных ===
+# === Сохранение / загрузка ===
 async def save_data():
     try:
         data = {"active_polls": active_polls, "stats": stats}
@@ -74,7 +72,6 @@ async def load_data():
     except Exception as e:
         print(f"[⚠️ Ошибка загрузки данных: {e}]")
 
-# === Сброс апдейтов ===
 async def reset_updates():
     try:
         updates = await bot.get_updates()
@@ -102,12 +99,10 @@ async def start_poll(poll: dict, from_admin=False):
             "active": True
         }
         await save_data()
-
         try:
             await bot.pin_chat_message(chat_id=CHAT_ID, message_id=msg.message_id, disable_notification=True)
         except exceptions.TelegramAPIError:
             pass
-
         await bot.send_message(CHAT_ID, "📢 <b>Новый опрос!</b>\nПроголосуйте, чтобы подтвердить участие 👇")
         if from_admin:
             await bot.send_message(ADMIN_ID, f"✅ Опрос запущен вручную: {poll['question']}")
@@ -119,33 +114,12 @@ async def start_poll(poll: dict, from_admin=False):
 async def restore_active_polls():
     if not active_polls:
         return
-    restored = []
-    removed = []
     for poll_id, data in list(active_polls.items()):
         try:
             msg_id = data.get("message_id")
-            try:
-                await bot.edit_message_reply_markup(chat_id=CHAT_ID, message_id=msg_id, reply_markup=None)
-                restored.append((poll_id, msg_id))
-            except exceptions.BadRequest as br:
-                err_text = str(br)
-                if "message to edit not found" in err_text or "message can't be edited" in err_text or "message is not modified" in err_text:
-                    del active_polls[poll_id]
-                    removed.append((poll_id, "message not found/edited"))
-                else:
-                    restored.append((poll_id, msg_id))
-            except exceptions.TelegramAPIError:
-                del active_polls[poll_id]
-                removed.append((poll_id, "telegram api error"))
-        except Exception as e:
-            print(f"[⚠️ Ошибка при восстановлении {poll_id}: {e}]")
-            if poll_id in active_polls:
-                del active_polls[poll_id]
-            removed.append((poll_id, "unknown error"))
-    if restored:
-        print(f"[🔁 Восстановлены опросы: {restored}]")
-    if removed:
-        print(f"[🗑 Удалены/не найдены опросы: {removed}]")
+            await bot.edit_message_reply_markup(chat_id=CHAT_ID, message_id=msg_id, reply_markup=None)
+        except Exception:
+            del active_polls[poll_id]
     await save_data()
 
 # === Напоминания ===
@@ -169,9 +143,8 @@ async def remind_if_needed():
                     CHAT_ID,
                     f"⏰ Напоминание: пока только {yes_count} человек(а) ответили 'Да ✅'. Не забудьте проголосовать!"
                 )
-                print(f"[🔔 Напоминание отправлено ({yes_count} 'Да')]")
             except Exception:
-                print("[⚠️ Не удалось отправить напоминание]")
+                pass
 
 # === Итоги опроса ===
 async def send_summary(poll):
@@ -181,15 +154,12 @@ async def send_summary(poll):
             votes = data.get("votes", {})
             yes_users = [f"{v['name']} (ID:{uid})" for uid, v in votes.items() if v["answer"] == "Да ✅"]
             no_users = [f"{v['name']} (ID:{uid})" for uid, v in votes.items() if v["answer"] == "Нет ❌"]
-
             try:
                 await bot.unpin_chat_message(chat_id=CHAT_ID, message_id=data["message_id"])
-            except exceptions.TelegramAPIError:
+            except Exception:
                 pass
-
             total_yes = len(yes_users)
             poll_day = poll.get("day")
-
             if poll_day == "fri":
                 text = (
                     "📊 <b>Итог опроса (суббота):</b>\n\n"
@@ -215,22 +185,15 @@ async def send_summary(poll):
                     f"{status}\n\n"
                     f"<i>Всего проголосовало: {len(votes)}</i>"
                 )
-
-            try:
-                await bot.send_message(CHAT_ID, text)
-            except exceptions.TelegramAPIError:
-                pass
-
+            await bot.send_message(CHAT_ID, text)
             for v in votes.values():
                 if v["answer"] == "Да ✅":
                     stats[v["name"]] = stats.get(v["name"], 0) + 1
-
             del active_polls[poll_id]
             await save_data()
-            print(f"[📈 Итоги опроса отправлены: {poll['question']}]")
             break
 
-# === Остальные команды ===
+# === Обработка голосов ===
 @dp.poll_answer_handler()
 async def handle_poll_answer(poll_answer: types.PollAnswer):
     uid = poll_answer.user.id
@@ -246,8 +209,10 @@ async def handle_poll_answer(poll_answer: types.PollAnswer):
             await save_data()
             return
 
-# === Команды ===
-# (остальные /addplayer, /removeplayer, /status, /stats, /nextpoll, /startpoll, /closepoll, /commands остаются без изменений — как у тебя сейчас)
+# === Отладочный лог (временно) ===
+@dp.message_handler()
+async def debug_all(message: types.Message):
+    print(f"[MSG] {message.from_user.id} | {message.text}")
 
 # === Планировщик ===
 def schedule_polls():
@@ -304,9 +269,14 @@ async def shutdown():
         pass
     print("[✅ Данные сохранены, бот остановлен]")
 
-# === Запуск ===
+# === Основной запуск ===
 async def main():
     await load_data()
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        print("[🔁 Webhook удалён (drop_pending_updates=True). Polling активирован]")
+    except Exception as e:
+        print(f"[⚠️ Не удалось удалить webhook: {e}]")
     await reset_updates()
     schedule_polls()
     scheduler.start()
@@ -327,3 +297,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
