@@ -32,14 +32,14 @@ stats = {}
 polls_config = [
     {
         "day": "tue",
-        "time_poll": "10:30",
+        "time_poll": "10:40",
         "time_game": "20:00",
         "question": "Сегодня собираемся на песчанке в 20:00?",
         "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]
     },
     {
         "day": "thu",
-        "time_poll": "10:30",
+        "time_poll": "10:40",
         "time_game": "20:00",
         "question": "Сегодня собираемся на песчанке в 20:00?",
         "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]
@@ -55,6 +55,7 @@ polls_config = [
 
 # === Работа с данными ===
 def save_data():
+    """Сохранение данных в файл"""
     try:
         data = {"active_polls": active_polls, "stats": stats}
         with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -64,6 +65,7 @@ def save_data():
         print(f"[⚠️ Ошибка при сохранении данных: {e}]")
 
 def load_data():
+    """Загрузка данных при старте"""
     global active_polls, stats
     try:
         if os.path.exists(DATA_FILE):
@@ -131,15 +133,18 @@ async def send_summary(poll):
             save_data()
             break
 
+# === Исправленный планировщик ===
 def schedule_polls():
     scheduler.remove_all_jobs()
+    loop = asyncio.get_event_loop()  # главный event loop
+
     for poll in polls_config:
         tp = list(map(int, poll["time_poll"].split(":")))
         tg = list(map(int, poll["time_game"].split(":")))
 
         # Запуск опроса
         scheduler.add_job(
-            lambda p=poll: asyncio.create_task(start_poll(p)),
+            lambda p=poll: asyncio.run_coroutine_threadsafe(start_poll(p), loop),
             trigger=CronTrigger(
                 day_of_week=poll["day"],
                 hour=tp[0],
@@ -152,12 +157,10 @@ def schedule_polls():
 
         # Авто-сводка
         hour_before = max(tg[0] - 1, 0)
-
-        # Для пятницы сводка переносится на субботу
         next_day = "sat" if poll["day"] == "fri" else poll["day"]
 
         scheduler.add_job(
-            lambda p=poll: asyncio.create_task(send_summary(p)),
+            lambda p=poll: asyncio.run_coroutine_threadsafe(send_summary(p), loop),
             trigger=CronTrigger(
                 day_of_week=next_day,
                 hour=hour_before,
@@ -255,6 +258,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
