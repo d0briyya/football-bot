@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 import os
+import json
 import asyncio
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ParseMode
-from aiogram.utils import executor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from pytz import timezone
 from dotenv import load_dotenv
 from aiohttp import web
 
@@ -14,25 +16,30 @@ load_dotenv()
 TOKEN = os.getenv("TG_BOT_TOKEN", "8196071953:AAF2wQ19VOkfPKvPfPaG0YoX33eVcWaC_yU")
 CHAT_ID = int(os.getenv("TG_CHAT_ID", "-1002841862533"))
 ADMIN_ID = int(os.getenv("TG_ADMIN_ID", "914344682"))
+DATA_FILE = "bot_data.json"
 
 bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher(bot)
-scheduler = AsyncIOScheduler()
+
+# === Временная зона Калининграда ===
+kaliningrad_tz = timezone("Europe/Kaliningrad")
+scheduler = AsyncIOScheduler(timezone=kaliningrad_tz)
+
 active_polls = {}
-stats = {}  # {username: {"yes": X, "no": Y}}
+stats = {}
 
 # === Настройки опросов ===
 polls_config = [
     {
         "day": "tue",
-        "time_poll": "10:00",
+        "time_poll": "10:30",
         "time_game": "20:00",
         "question": "Сегодня собираемся на песчанке в 20:00?",
         "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]
     },
     {
         "day": "thu",
-        "time_poll": "10:00",
+        "time_poll": "10:30",
         "time_game": "20:00",
         "question": "Сегодня собираемся на песчанке в 20:00?",
         "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]
@@ -45,6 +52,30 @@ polls_config = [
         "options": ["Да ✅", "Нет ❌"]
     }
 ]
+
+# === Работа с данными ===
+def save_data():
+    try:
+        data = {"active_polls": active_polls, "stats": stats}
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"[💾 Данные сохранены {datetime.now(kaliningrad_tz):%H:%M:%S}]")
+    except Exception as e:
+        print(f"[⚠️ Ошибка при сохранении данных: {e}]")
+
+def load_data():
+    global active_polls, stats
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                active_polls = data.get("active_polls", {})
+                stats = data.get("stats", {})
+            print("[✅ Данные успешно восстановлены из файла]")
+        else:
+            print("[ℹ️ Нет сохранённых данных — старт с нуля]")
+    except Exception as e:
+        print(f"[⚠️ Ошибка при загрузке данных: {e}]")
 
 # === Служебные функции ===
 async def reset_updates():
@@ -71,7 +102,8 @@ async def start_poll(poll):
             "poll": poll,
             "votes": {}
         }
-        print(f"[{datetime.now():%H:%M:%S}] 🗳 Опрос запущен: {poll['question']}")
+        save_data()
+        print(f"[{datetime.now(kaliningrad_tz):%H:%M:%S}] 🗳 Опрос запущен: {poll['question']}")
     except Exception as e:
         print(f"[❌ Ошибка при запуске опроса: {e}]")
 
@@ -82,7 +114,6 @@ async def send_summary(poll):
             yes = [u for u, v in votes.items() if v == "Да ✅"]
             no = [u for u, v in votes.items() if v == "Нет ❌"]
 
-            # фиксируем статистику
             for user in yes:
                 stats.setdefault(user, {"yes": 0, "no": 0})["yes"] += 1
             for user in no:
@@ -97,6 +128,7 @@ async def send_summary(poll):
             )
             await bot.send_message(CHAT_ID, text)
             del active_polls[poll_id]
+            save_data()
             break
 
 def schedule_polls():
@@ -105,21 +137,42 @@ def schedule_polls():
         tp = list(map(int, poll["time_poll"].split(":")))
         tg = list(map(int, poll["time_game"].split(":")))
 
-        # запуск опроса
-        scheduler.add_job(lambda p=poll: asyncio.create_task(start_poll(p)),
-                          trigger="cron", day_of_week=poll["day"],
-                          hour=tp[0], minute=tp[1],
-                          id=f"poll_{poll['day']}", replace_existing=True)
+        # Запуск опроса
+        scheduler.add_job(
+            lambda p=poll: asyncio.create_task(start_poll(p)),
+            trigger=CronTrigger(
+                day_of_week=poll["day"],
+                hour=tp[0],
+                minute=tp[1],
+                timezone=kaliningrad_tz
+            ),
+            id=f"poll_{poll['day']}",
+            replace_existing=True
+        )
 
-        # авто-сводка за 1 час до игры
+        # Авто-сводка
         hour_before = max(tg[0] - 1, 0)
-        scheduler.add_job(lambda p=poll: asyncio.create_task(send_summary(p)),
-                          trigger="cron", day_of_week=poll["day"],
-                          hour=hour_before, minute=tg[1],
-                          id=f"summary_{poll['day']}", replace_existing=True)
-    print("[✅ Планировщик заданий обновлён]")
 
-# === Обработчики событий ===
+        # Для пятницы сводка переносится на субботу
+        next_day = "sat" if poll["day"] == "fri" else poll["day"]
+
+        scheduler.add_job(
+            lambda p=poll: asyncio.create_task(send_summary(p)),
+            trigger=CronTrigger(
+                day_of_week=next_day,
+                hour=hour_before,
+                minute=tg[1],
+                timezone=kaliningrad_tz
+            ),
+            id=f"summary_{poll['day']}",
+            replace_existing=True
+        )
+
+    # Автосохранение каждые 5 минут
+    scheduler.add_job(save_data, "interval", minutes=5, id="autosave", replace_existing=True)
+    print("[✅ Планировщик заданий обновлён (Europe/Kaliningrad)]")
+
+# === Обработчики ===
 @dp.poll_answer_handler()
 async def handle_poll_answer(poll_answer: types.PollAnswer):
     user = poll_answer.user.first_name
@@ -131,22 +184,24 @@ async def handle_poll_answer(poll_answer: types.PollAnswer):
             else:
                 choice = data["poll"]["options"][option_ids[0]]
                 data["votes"][user] = choice
+            save_data()
             break
 
 # === Команды ===
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: types.Message):
     if message.from_user.id != ADMIN_ID:
-        await message.reply("✅ Бот уже активен и работает. Голосуй в опросах!")
-        return
+        return await message.reply("✅ Бот уже активен. Голосуй в опросах!")
     schedule_polls()
     if not scheduler.running:
         scheduler.start()
-    await message.reply("✅ Бот активирован.\nОпросы будут появляться в нужные дни.\n"
-                        "Команды:\n"
-                        "• /poll [tue|thu|fri] — запустить вручную\n"
-                        "• /stats — статистика игроков")
-    print(f"[{datetime.now():%H:%M:%S}] /start от {message.from_user.id}")
+    await message.reply(
+        "✅ Бот активирован.\nОпросы будут появляться по расписанию.\n"
+        "Команды:\n"
+        "• /poll [tue|thu|fri] — запустить вручную\n"
+        "• /stats — статистика игроков"
+    )
+    print(f"[{datetime.now(kaliningrad_tz):%H:%M:%S}] /start от {message.from_user.id}")
 
 @dp.message_handler(commands=["poll"])
 async def manual_poll(message: types.Message):
@@ -171,7 +226,7 @@ async def cmd_stats(message: types.Message):
     )
     await message.answer(f"📈 <b>ТОП-5 игроков по посещаемости:</b>\n\n{top}", parse_mode="HTML")
 
-# === KEEP-ALIVE WEB SERVER ===
+# === KEEP-ALIVE ===
 async def handle(request):
     return web.Response(text="✅ Bot is alive and running!")
 
@@ -186,19 +241,22 @@ async def start_keepalive_server():
 
 # === Основной запуск ===
 async def main():
+    load_data()
     await reset_updates()
     schedule_polls()
     scheduler.start()
-    await start_keepalive_server()  # запуск веб-сервера keepalive
-    print("[🚀 Бот запущен и работает автономно]")
+    await start_keepalive_server()
+    print(f"[🚀 Бот запущен {datetime.now(kaliningrad_tz):%Y-%m-%d %H:%M:%S %Z}]")
     try:
-        await bot.send_message(ADMIN_ID, "✅ Бот запущен и планировщик активирован!")
+        await bot.send_message(ADMIN_ID, "✅ Бот запущен и данные восстановлены!")
     except Exception as e:
         print(f"[warning] Не удалось уведомить админа: {e}")
     await dp.start_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
 
 
 
