@@ -36,14 +36,27 @@ LOCK_FILE = "bot.lock"
 LOG_FILE = "bot.log"
 
 # === Логирование ===
+import sys
+
+# === Чистое логирование для Railway ===
+class StdoutFilter(logging.Filter):
+    def filter(self, record):
+        return record.levelno < logging.ERROR  # INFO и WARNING → stdout
+
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.addFilter(StdoutFilter())
+
+stderr_handler = logging.StreamHandler(sys.stderr)
+stderr_handler.setLevel(logging.ERROR)  # ERROR и CRITICAL → stderr
+
+file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler()
-    ]
+    handlers=[file_handler, stdout_handler, stderr_handler]
 )
+
 log = logging.getLogger("bot")
 
 # Быстрая проверка токена
@@ -575,6 +588,7 @@ if __name__ == "__main__":
         if os.path.exists(LOCK_FILE):
             os.remove(LOCK_FILE)
         raise
+
 
 
 
