@@ -154,8 +154,8 @@ polls_config = [
      "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
     {"day": "fri", "time_poll": "21:00", "time_game": "12:00",
      "question": "Завтра в 12:00 собираемся на песчанке?",
-     "options": ["Да ✅", "Нет ❌"]}
-    {"day": "fri", "time_poll": "22:38", "time_game": "10:00",
+     "options": ["Да ✅", "Нет ❌"]},
+    {"day": "fri", "time_poll": "22:39", "time_game": "10:00",
      "question": "проверка связи",
      "options": ["Да ✅", "Нет ❌"]}
 ]
@@ -872,6 +872,7 @@ if __name__ == "__main__":
             continue
         else:
             break
+
 
 
 
