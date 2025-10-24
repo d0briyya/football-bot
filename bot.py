@@ -723,34 +723,51 @@ def schedule_polls() -> None:
             tp = list(map(int, poll["time_poll"].split(":")))
             tg = list(map(int, poll["time_game"].split(":")))
 
-            # Create jobs that will *create* coroutines when run (avoid reusing coroutine objects)
+            # Опрос по Калининградскому времени
             scheduler.add_job(
                 lambda p=poll: asyncio.run_coroutine_threadsafe(start_poll(p), loop),
-                trigger=CronTrigger(day_of_week=poll["day"], hour=tp[0], minute=tp[1]),
+                trigger=CronTrigger(
+                    day_of_week=poll["day"],
+                    hour=tp[0],
+                    minute=tp[1],
+                    timezone=KALININGRAD_TZ  # <── добавлено
+                ),
+                id=f"poll_{poll['day']}"
             )
 
+            # Итог за час до игры (тоже по Калининградскому времени)
             next_day = "sat" if poll["day"] == "fri" else poll["day"]
             summary_hour = max(tg[0] - 1, 0)
             scheduler.add_job(
                 lambda p=poll: asyncio.run_coroutine_threadsafe(send_summary(p), loop),
-                trigger=CronTrigger(day_of_week=next_day, hour=summary_hour, minute=tg[1]),
+                trigger=CronTrigger(
+                    day_of_week=next_day,
+                    hour=summary_hour,
+                    minute=tg[1],
+                    timezone=KALININGRAD_TZ  # <── добавлено
+                ),
+                id=f"summary_{poll['day']}"
             )
+
+            log.info(f"✅ Scheduled poll for {poll['day']} at {poll['time_poll']} (Kaliningrad)")
         except Exception:
             log.exception("Failed to schedule poll: %s", poll)
 
-    # periodic autosave every 10 minutes
     try:
         scheduler.add_job(lambda: asyncio.run_coroutine_threadsafe(save_data(), loop), "interval", minutes=10)
     except Exception:
         log.exception("Failed to schedule autosave job")
 
-    # daily backup at 03:00
     try:
-        scheduler.add_job(make_backup, "cron", hour=3, minute=0)
+        scheduler.add_job(make_backup, "cron", hour=3, minute=0, timezone=KALININGRAD_TZ)
     except Exception:
         log.exception("Failed to schedule backup job")
 
     log.info("Scheduler refreshed (timezone: Europe/Kaliningrad)")
+    log.info("=== Запланированные задания ===")
+    for job in scheduler.get_jobs():
+        log.info(f"Job: {job.id}, next run: {job.next_run_time}")
+
 
 # -------------------- KeepAlive server for Railway --------------------
 async def handle(request):
@@ -842,6 +859,8 @@ if __name__ == "__main__":
             continue
         else:
             break
+
+
 
 
 
