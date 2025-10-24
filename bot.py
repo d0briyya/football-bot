@@ -1,19 +1,8 @@
 # -*- coding: utf-8 -*-
-"""
-Refactored and hardened Telegram bot (aiogram 2.x) — improved by ChatGPT (senior-style)
-Key improvements made:
-- Safer single-instance lock handling (robust PID checks and explicit removal on signals)
-- Fixed scheduler job creation: create coroutines when jobs run (avoid reusing coroutine objects)
-- Robust environment parsing and helpful startup errors
-- Improved safe_telegram_call with explicit handling of Flood wait / RetryAfter
-- Message-size safety (split long summaries into chunks to avoid Telegram limits)
-- Stronger typing, clearer helper functions, better logging messages
-- Autosave, backup and graceful shutdown improvements
-- Small UX improvements (responses, admin notifications)
-
+""" Refactored and hardened Telegram bot (aiogram 2.x) — improved by ChatGPT (senior-style)
+Key improvements made: ...
 Note: keep environment variables: TG_BOT_TOKEN, TG_CHAT_ID, TG_ADMIN_ID, PORT
 """
-
 from __future__ import annotations
 
 import os
@@ -35,7 +24,6 @@ except Exception:
     psutil = None
 
 from logging.handlers import RotatingFileHandler
-
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ParseMode
 from aiogram.utils import exceptions
@@ -101,7 +89,6 @@ def _read_pid_from_lock(path: str) -> Optional[int]:
     except Exception:
         return None
 
-
 def ensure_single_instance(lock_path: str = LOCK_FILE) -> None:
     """Ensure only one instance runs. If stale lock exists, remove it.
     On failure, raise RuntimeError to prevent double startup.
@@ -142,7 +129,6 @@ def ensure_single_instance(lock_path: str = LOCK_FILE) -> None:
 
     atexit.register(_cleanup)
 
-
 ensure_single_instance()
 
 # -------------------- Bot, scheduler, timezone --------------------
@@ -175,21 +161,17 @@ WEEKDAY_MAP = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun"
 TELEGRAM_MESSAGE_LIMIT = 4096
 
 # -------------------- Helpers --------------------
-
 def now_tz() -> datetime:
     return datetime.now(KALININGRAD_TZ)
 
-
 def iso_now() -> str:
     return now_tz().isoformat()
-
 
 def is_admin(user_id: int) -> bool:
     try:
         return int(user_id) == int(ADMIN_ID)
     except Exception:
         return False
-
 
 def find_last_active_poll() -> Optional[Tuple[str, Dict[str, Any]]]:
     if not active_polls:
@@ -199,7 +181,6 @@ def find_last_active_poll() -> Optional[Tuple[str, Dict[str, Any]]]:
         if data.get("active"):
             return pid, data
     return None
-
 
 def format_poll_votes(data: Dict[str, Any]) -> str:
     votes = data.get("votes", {})
@@ -217,7 +198,6 @@ async def save_data() -> None:
     except Exception:
         log.exception("Failed to save data")
 
-
 async def load_data() -> None:
     global active_polls, stats
     if os.path.exists(DATA_FILE):
@@ -231,7 +211,6 @@ async def load_data() -> None:
             log.exception("Failed to load data — starting with empty state")
     else:
         log.info("No data file found — starting fresh")
-
 
 def make_backup() -> None:
     try:
@@ -264,6 +243,168 @@ async def safe_telegram_call(func, *args, retries: int = 3, **kwargs):
             if attempt == retries:
                 return None
             await asyncio.sleep(1 + attempt)
+
+# -------------------- New helpers: compute poll close datetime & scheduling reminders --------------------
+def compute_poll_close_dt(poll: Dict[str, Any], start_dt: datetime) -> datetime:
+    """
+    Compute poll closing datetime using poll['day'] and poll['time_game'].
+    If poll['day']=='manual' or computation fails, fallback to start_dt + 24h.
+    """
+    try:
+        day = poll.get("day")
+        tg_hour, tg_minute = map(int, poll.get("time_game", "23:59").split(":"))
+        if day not in WEEKDAY_MAP:
+            # manual poll or unknown: default 24h lifetime
+            return start_dt + timedelta(hours=24)
+
+        target = WEEKDAY_MAP[day]
+        days_ahead = (target - start_dt.weekday()) % 7
+        base_date = start_dt.date() + timedelta(days=days_ahead)
+        base = datetime(base_date.year, base_date.month, base_date.day, tg_hour, tg_minute)
+        base_local = KALININGRAD_TZ.localize(base) if base.tzinfo is None else base.astimezone(KALININGRAD_TZ)
+        # Ensure close is after start; if not, assume next week
+        if base_local <= start_dt:
+            base_local = base_local + timedelta(days=7)
+        return base_local
+    except Exception:
+        log.exception("Failed to compute poll close dt for poll: %s", poll)
+        return start_dt + timedelta(hours=24)
+
+async def send_reminder_if_needed(poll_id: str) -> None:
+    """Send reminder to CHAT_ID if yes_count < 10 for the poll."""
+    try:
+        data = active_polls.get(poll_id)
+        if not data or not data.get("active"):
+            return
+        votes = data.get("votes", {})
+        yes_users = [v for v in votes.values() if v.get("answer", "").startswith("Да")]
+        if len(yes_users) < 10:
+            # send reminder
+            question = data.get("poll", {}).get("question", "Пожалуйста, проголосуйте!")
+            text = f"🔔 Напоминание: <b>{question}</b>\nПожалуйста, проголосуйте — нам нужно как минимум 10 'Да' для подтверждения."
+            await safe_telegram_call(bot.send_message, CHAT_ID, text)
+            log.info("Reminder sent for poll %s (yes=%s)", poll_id, len(yes_users))
+    except Exception:
+        log.exception("Error in send_reminder_if_needed for poll %s", poll_id)
+
+async def tag_questionable_users(poll_id: str) -> None:
+    """
+    Tag users who voted 'Под вопросом' (or containing 'Под вопросом' substring).
+    Use saved user_id to create mention via tg://user?id=...
+    """
+    try:
+        data = active_polls.get(poll_id)
+        if not data or not data.get("active"):
+            return
+        votes = data.get("votes", {})
+        # find close_dt stored earlier (ISO)
+        close_iso = data.get("close_dt")
+        close_dt = None
+        if close_iso:
+            try:
+                close_dt = KALININGRAD_TZ.localize(datetime.fromisoformat(close_iso))
+            except Exception:
+                try:
+                    close_dt = datetime.fromisoformat(close_iso)
+                except Exception:
+                    close_dt = None
+
+        now = now_tz()
+        mins_left = int((close_dt - now).total_seconds() // 60) if close_dt else None
+
+        for v in votes.values():
+            answer = v.get("answer", "")
+            if "под" in answer.lower() or "под вопрос" in answer.lower() or "?" in answer:
+                user_id = v.get("user_id")
+                name = v.get("name", "Участник")
+                if not user_id:
+                    # we can't mention without user_id; fallback to using plain name
+                    text = f"{name}, ⚠️ вы отметили 'Под вопросом'. Осталось {mins_left} минут до закрытия опроса. Пожалуйста, подтвердите участие."
+                    await safe_telegram_call(bot.send_message, CHAT_ID, text)
+                    log.debug("Tagged by name (no user_id) for poll %s: %s", poll_id, name)
+                else:
+                    mention = f'<a href="tg://user?id={user_id}">{name}</a>'
+                    text = f"{mention}, ⚠️ вы отметили 'Под вопросом'. Осталось {mins_left} минут до закрытия опроса. Пожалуйста, подтвердите участие."
+                    await safe_telegram_call(bot.send_message, CHAT_ID, text, parse_mode=ParseMode.HTML)
+                    log.debug("Mentioned user %s for poll %s", user_id, poll_id)
+    except Exception:
+        log.exception("Error in tag_questionable_users for poll %s", poll_id)
+
+def schedule_poll_reminders(poll_id: str) -> None:
+    """
+    Schedule the two kinds of jobs for the given poll:
+      - every 3 hours reminder if yes<10 (from start until close)
+      - every 30 minutes tagging 'Под вопросом' users from close-2h until close
+    Store close_dt in active_polls[poll_id]['close_dt'] as ISO.
+    """
+    try:
+        data = active_polls.get(poll_id)
+        if not data:
+            return
+        poll = data.get("poll", {})
+        # Only for Tue and Thu per request
+        if poll.get("day") not in ("tue", "thu"):
+            return
+
+        loop = asyncio.get_event_loop()
+        start_dt = now_tz()
+        close_dt = compute_poll_close_dt(poll, start_dt)
+        # safety: ensure at least 2 hours duration, otherwise fallback to start+24h
+        if close_dt <= start_dt + timedelta(minutes=5):
+            close_dt = start_dt + timedelta(hours=24)
+
+        # store close timestamp for later use by tag job
+        try:
+            data["close_dt"] = close_dt.isoformat()
+        except Exception:
+            data["close_dt"] = None
+
+        # Job ids
+        reminder_job_id = f"reminder_{poll_id}"
+        tag_job_id = f"tagq_{poll_id}"
+
+        # schedule reminder every 3 hours from start to close
+        try:
+            # remove previous if exists
+            try:
+                scheduler.remove_job(reminder_job_id)
+            except Exception:
+                pass
+            scheduler.add_job(
+                lambda pid=poll_id: asyncio.run_coroutine_threadsafe(send_reminder_if_needed(pid), loop),
+                trigger="interval",
+                hours=3,
+                start_date=start_dt,
+                end_date=close_dt,
+                id=reminder_job_id,
+            )
+            log.info("Scheduled 3h reminders for poll %s from %s to %s", poll_id, start_dt, close_dt)
+        except Exception:
+            log.exception("Failed to schedule 3h reminders for poll %s", poll_id)
+
+        # schedule tagging every 30 minutes starting 2h before close until close
+        try:
+            tag_start = max(start_dt, close_dt - timedelta(hours=2))
+            try:
+                scheduler.remove_job(tag_job_id)
+            except Exception:
+                pass
+            scheduler.add_job(
+                lambda pid=poll_id: asyncio.run_coroutine_threadsafe(tag_questionable_users(pid), loop),
+                trigger="interval",
+                minutes=30,
+                start_date=tag_start,
+                end_date=close_dt,
+                id=tag_job_id,
+            )
+            log.info("Scheduled tagging (30m) for poll %s from %s to %s", poll_id, tag_start, close_dt)
+        except Exception:
+            log.exception("Failed to schedule tagging for poll %s", poll_id)
+
+        # persist that we scheduled these (for debugging)
+        asyncio.create_task(save_data())
+    except Exception:
+        log.exception("Error in schedule_poll_reminders for poll %s", poll_id)
 
 # -------------------- Poll lifecycle --------------------
 async def start_poll(poll: Dict[str, Any], from_admin: bool = False) -> None:
@@ -299,9 +440,14 @@ async def start_poll(poll: Dict[str, Any], from_admin: bool = False) -> None:
         if from_admin:
             await safe_telegram_call(bot.send_message, ADMIN_ID, f"✅ Опрос вручную: {poll['question']}")
         log.info("Poll created: %s", poll.get("question"))
+
+        # --- NEW: schedule reminders and tagging for Tue/Thu polls ---
+        try:
+            schedule_poll_reminders(poll_id)
+        except Exception:
+            log.exception("Failed to setup reminders for poll %s", poll_id)
     except Exception:
         log.exception("Failed to start poll")
-
 
 async def _chunk_and_send(chat_id: int, text: str) -> None:
     """Send text in chunks respecting TELEGRAM_MESSAGE_LIMIT."""
@@ -310,7 +456,6 @@ async def _chunk_and_send(chat_id: int, text: str) -> None:
     chunks = [text[i:i+TELEGRAM_MESSAGE_LIMIT] for i in range(0, len(text), TELEGRAM_MESSAGE_LIMIT)]
     for chunk in chunks:
         await safe_telegram_call(bot.send_message, chat_id, chunk)
-
 
 async def send_summary(poll: Dict[str, Any]) -> None:
     """Finalize poll, summarize votes and update stats. Splits long messages automatically."""
@@ -351,6 +496,23 @@ async def send_summary(poll: Dict[str, Any]) -> None:
                     if v["answer"].startswith("Да"):
                         stats[v["name"]] = stats.get(v["name"], 0) + 1
 
+                # remove scheduled reminder/tag jobs for this poll if any
+                try:
+                    reminder_job_id = f"reminder_{poll_id}"
+                    tag_job_id = f"tagq_{poll_id}"
+                    try:
+                        scheduler.remove_job(reminder_job_id)
+                        log.info("Removed reminder job %s", reminder_job_id)
+                    except Exception:
+                        pass
+                    try:
+                        scheduler.remove_job(tag_job_id)
+                        log.info("Removed tag job %s", tag_job_id)
+                    except Exception:
+                        pass
+                except Exception:
+                    log.exception("Failed to remove scheduled jobs for poll %s", poll_id)
+
                 active_polls.pop(poll_id, None)
                 await save_data()
                 log.info("Summary sent for poll: %s", poll.get("question"))
@@ -371,7 +533,8 @@ async def handle_poll_answer(poll_answer: types.PollAnswer) -> None:
                     data["votes"].pop(str(uid), None)
                 else:
                     answer = data["poll"]["options"][option_ids[0]]
-                    data["votes"][str(uid)] = {"name": uname, "answer": answer}
+                    # --- NEW: store user_id to enable direct mentions later ---
+                    data["votes"][str(uid)] = {"name": uname, "answer": answer, "user_id": uid}
                 # save asynchronously (fire-and-forget)
                 asyncio.create_task(save_data())
                 log.debug("Vote saved: %s -> %s", uname, data["votes"].get(str(uid)))
@@ -383,7 +546,6 @@ async def handle_poll_answer(poll_answer: types.PollAnswer) -> None:
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: types.Message) -> None:
     await message.reply("👋 Привет! Я бот для организации игр на песчанке. Напиши /commands для списка команд.")
-
 
 @dp.message_handler(commands=["commands"])
 async def cmd_commands(message: types.Message) -> None:
@@ -406,7 +568,6 @@ async def cmd_commands(message: types.Message) -> None:
     )
     await message.reply(text)
 
-
 @dp.message_handler(commands=["nextpoll"])
 async def cmd_nextpoll(message: types.Message) -> None:
     try:
@@ -420,7 +581,6 @@ async def cmd_nextpoll(message: types.Message) -> None:
         log.exception("Error in /nextpoll")
         await message.reply("⚠️ Ошибка при определении следующего опроса. Проверьте логи.")
 
-
 @dp.message_handler(commands=["status"])
 async def cmd_status(message: types.Message) -> None:
     last = find_last_active_poll()
@@ -430,14 +590,12 @@ async def cmd_status(message: types.Message) -> None:
     poll = data["poll"]
     await message.reply(f"<b>{poll['question']}</b>\n\n{format_poll_votes(data)}")
 
-
 @dp.message_handler(commands=["stats"])
 async def cmd_stats(message: types.Message) -> None:
     if not stats:
         return await message.reply("📊 Пока нет статистики.")
     text = "\n".join(f"{name}: {count}" for name, count in sorted(stats.items(), key=lambda x: -x[1]))
     await message.reply(f"📈 Статистика 'Да ✅':\n{text}")
-
 
 @dp.message_handler(commands=["uptime"])
 async def cmd_uptime(message: types.Message) -> None:
@@ -458,7 +616,6 @@ async def cmd_startpoll(message: types.Message) -> None:
     await start_poll(poll, from_admin=True)
     await message.reply("✅ Опрос создан вручную.")
 
-
 @dp.message_handler(commands=["closepoll"])
 async def cmd_closepoll(message: types.Message) -> None:
     if not is_admin(message.from_user.id):
@@ -469,7 +626,6 @@ async def cmd_closepoll(message: types.Message) -> None:
     _, data = last
     await send_summary(data["poll"])
     await message.reply("✅ Опрос закрыт и итоги отправлены.")
-
 
 @dp.message_handler(commands=["addplayer"])
 async def cmd_addplayer(message: types.Message) -> None:
@@ -486,7 +642,6 @@ async def cmd_addplayer(message: types.Message) -> None:
     data["votes"][key] = {"name": name, "answer": "Да ✅ (добавлен вручную)"}
     await save_data()
     await message.reply(f"✅ Игрок '{name}' добавлен как 'Да ✅'.")
-
 
 @dp.message_handler(commands=["removeplayer"])
 async def cmd_removeplayer(message: types.Message) -> None:
@@ -507,14 +662,12 @@ async def cmd_removeplayer(message: types.Message) -> None:
     await save_data()
     await message.reply(f"✅ Игрок '{name}' удалён (найдено: {removed}).")
 
-
 @dp.message_handler(commands=["reload"])
 async def cmd_reload(message: types.Message) -> None:
     if not is_admin(message.from_user.id):
         return await message.reply("❌ Нет прав.")
     schedule_polls()
     await message.reply("✅ Расписание обновлено.")
-
 
 @dp.message_handler(commands=["summary"])
 async def cmd_summary(message: types.Message) -> None:
@@ -527,7 +680,6 @@ async def cmd_summary(message: types.Message) -> None:
     await send_summary(data["poll"])
     await message.reply("✅ Итог отправлен вручную.")
 
-
 @dp.message_handler(commands=["backup"])
 async def cmd_backup(message: types.Message) -> None:
     if not is_admin(message.from_user.id):
@@ -538,7 +690,6 @@ async def cmd_backup(message: types.Message) -> None:
         await message.reply("⚠️ Данных для бэкапа нет.")
 
 # -------------------- Scheduler helpers --------------------
-
 def compute_next_poll_datetime() -> Optional[Tuple[datetime, Dict[str, Any]]]:
     now = now_tz()
     candidates = []
@@ -551,7 +702,7 @@ def compute_next_poll_datetime() -> Optional[Tuple[datetime, Dict[str, Any]]]:
         days_ahead = (target - now.weekday()) % 7
         # build localized target datetime
         base = datetime(now.year, now.month, now.day, hour, minute)
-        base_local = KALININGRAD_TZ.localize(base)
+        base_local = KALININGRAD_TZ.localize(base) if base.tzinfo is None else base.astimezone(KALININGRAD_TZ)
         dt = base_local + timedelta(days=days_ahead)
         if dt <= now:
             dt += timedelta(days=7)
@@ -559,7 +710,6 @@ def compute_next_poll_datetime() -> Optional[Tuple[datetime, Dict[str, Any]]]:
     if not candidates:
         return None
     return sorted(candidates, key=lambda x: x[0])[0]
-
 
 def schedule_polls() -> None:
     scheduler.remove_all_jobs()
@@ -606,7 +756,6 @@ def schedule_polls() -> None:
 async def handle(request):
     return web.Response(text="✅ Bot is alive")
 
-
 async def start_keepalive_server() -> None:
     app = web.Application()
     app.router.add_get("/", handle)
@@ -626,7 +775,6 @@ async def global_errors(update, exception):
         log.exception("Failed to notify admin about error")
     return True
 
-
 async def shutdown() -> None:
     log.info("Shutting down...")
     try:
@@ -642,7 +790,6 @@ async def shutdown() -> None:
     except Exception:
         log.exception("Error closing bot")
     log.info("Shutdown complete.")
-
 
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -681,7 +828,6 @@ async def main() -> None:
     log.info("Start polling...")
     await dp.start_polling()
 
-
 if __name__ == "__main__":
     # robust restart loop
     while True:
@@ -696,6 +842,7 @@ if __name__ == "__main__":
             continue
         else:
             break
+
 
 
 
