@@ -4,3 +4,4 @@ python-dotenv==1.1.1
 colorlog==6.8.2
 aiohttp
 pytz
+psutil
