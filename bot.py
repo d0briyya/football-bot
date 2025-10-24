@@ -766,7 +766,8 @@ def schedule_polls() -> None:
     log.info("Scheduler refreshed (timezone: Europe/Kaliningrad)")
     log.info("=== Запланированные задания ===")
     for job in scheduler.get_jobs():
-        log.info(f"Job: {job.id}, next run: {job.next_run_time}")
+        nxt = getattr(job, "next_run_time", None)
+        log.info(f"Job: {job.id}, next run: {nxt}")
 
 
 # -------------------- KeepAlive server for Railway --------------------
@@ -778,9 +779,18 @@ async def start_keepalive_server() -> None:
     app.router.add_get("/", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    log.info("KeepAlive server started on port %s", PORT)
+    try:
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
+        await site.start()
+        log.info("KeepAlive server started on port %s", PORT)
+    except OSError as e:
+        if e.errno == 98:
+            log.warning("⚠️ Port %s already in use, skipping KeepAlive server startup", PORT)
+        else:
+            log.exception("Failed to start KeepAlive server")
+            raise
+
+
 
 # -------------------- Errors and shutdown --------------------
 @dp.errors_handler()
@@ -859,6 +869,7 @@ if __name__ == "__main__":
             continue
         else:
             break
+
 
 
 
