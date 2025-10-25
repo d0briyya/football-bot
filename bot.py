@@ -136,7 +136,9 @@ bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher(bot)
 
 KALININGRAD_TZ = timezone("Europe/Kaliningrad")
-scheduler = AsyncIOScheduler(timezone=KALININGRAD_TZ)
+# Планировщик создадим внутри main(), чтобы он корректно работал в том же event loop, что и aiogram
+scheduler: Optional[AsyncIOScheduler] = None
+
 
 START_TIME = datetime.now()
 
@@ -154,8 +156,7 @@ polls_config = [
      "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
     {"day": "fri", "time_poll": "21:00", "time_game": "12:00",
      "question": "Завтра в 12:00 собираемся на песчанке?",
-     "options": ["Да ✅", "Нет ❌"]},
-    
+     "options": ["Да ✅", "Нет ❌"]}
 ]
 
 WEEKDAY_MAP = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
@@ -840,6 +841,18 @@ async def main() -> None:
 
     # schedule jobs and keepalive + scheduler
     await start_keepalive_server()
+
+    # === ИНИЦИАЛИЗАЦИЯ ПЛАНИРОВЩИКА (Scheduler) ===
+    try:
+        # Получаем текущий активный event loop (тот же, что использует aiogram)
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+
+    global scheduler
+    scheduler = AsyncIOScheduler(timezone=KALININGRAD_TZ, event_loop=loop)
+
+    # Планируем опросы и запускаем планировщик
     schedule_polls()
     try:
         scheduler.start()
@@ -856,6 +869,7 @@ async def main() -> None:
     log.info("Start polling...")
     await dp.start_polling()
 
+
 if __name__ == "__main__":
     # robust restart loop
     while True:
@@ -870,12 +884,6 @@ if __name__ == "__main__":
             continue
         else:
             break
-
-
-
-
-
-
 
 
 
