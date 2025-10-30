@@ -378,7 +378,12 @@ def compute_poll_close_dt(poll: Dict[str, Any], start_dt: datetime) -> datetime:
         target = WEEKDAY_MAP[day]
         days_ahead = (target - start_dt.weekday()) % 7
         base_date = start_dt.date() + timedelta(days=days_ahead)
-        base = datetime(base_date.year, base_date.month, base_date.day, tg_hour, tg_minute)
+        # For Tue/Thu close at 1 hour before game time (e.g., 19:00 if game at 20:00)
+        close_hour = tg_hour - 1 if day in ("tue", "thu") else tg_hour
+        close_minute = tg_minute
+        if close_hour < 0:
+            close_hour = 0
+        base = datetime(base_date.year, base_date.month, base_date.day, close_hour, close_minute)
         base_local = KALININGRAD_TZ.localize(base) if base.tzinfo is None else base.astimezone(KALININGRAD_TZ)
         # Ensure close is after start; if not, assume next week
         if base_local <= start_dt:
@@ -509,9 +514,18 @@ def schedule_poll_reminders(poll_id: str) -> None:
         except Exception:
             log.exception("Failed to schedule 3h reminders for poll %s", poll_id)
 
-        # schedule tagging every 30 minutes starting 2h before close until close
+        # schedule tagging: for Tue/Thu from 17:40 to 19:00 every 20 minutes; otherwise 30 minutes last 2h
         try:
-            tag_start = max(start_dt, close_dt - timedelta(hours=2))
+            poll_day = poll.get("day")
+            if poll_day in ("tue", "thu"):
+                # compute 17:40 same day (Kaliningrad)
+                tag_start_local = close_dt.replace(hour=17, minute=40, second=0, microsecond=0)
+                # ensure not before start
+                tag_start = max(start_dt, tag_start_local)
+                interval_minutes = 20
+            else:
+                tag_start = max(start_dt, close_dt - timedelta(hours=2))
+                interval_minutes = 30
             try:
                 scheduler.remove_job(tag_job_id)
             except Exception:
@@ -519,12 +533,12 @@ def schedule_poll_reminders(poll_id: str) -> None:
             scheduler.add_job(
                 lambda pid=poll_id: asyncio.run_coroutine_threadsafe(tag_questionable_users(pid), loop),
                 trigger="interval",
-                minutes=30,
+                minutes=interval_minutes,
                 start_date=tag_start,
                 end_date=close_dt,
                 id=tag_job_id,
             )
-            log.info("Scheduled tagging (30m) for poll %s from %s to %s", poll_id, tag_start, close_dt)
+            log.info("Scheduled tagging (%sm) for poll %s from %s to %s", interval_minutes, poll_id, tag_start, close_dt)
         except Exception:
             log.exception("Failed to schedule tagging for poll %s", poll_id)
         # Автоматическое закрытие опроса — добавить после всех scheduler.add_job
@@ -1030,16 +1044,22 @@ def schedule_polls() -> None:
                 args=[poll],
                 id=poll_job_id
             )
-            # корректное вычисление next_day
-            day_index = WEEKDAY_MAP[poll["day"]]
-            next_day_index = (day_index + 1) % 7
-            next_day = list(WEEKDAY_MAP.keys())[next_day_index]
+            # корректное вычисление времени итогов
             summary_hour = max(tg[0] - 1, 0)
             summary_job_id = f"summary_{poll['day']}_{idx}"
+            if poll["day"] in ("tue", "thu"):
+                # Итоги в тот же день за час до игры (например, 19:00)
+                summary_dow = poll["day"]
+            else:
+                # Для пятницы: на следующий день (суббота) за час до игры
+                day_index = WEEKDAY_MAP[poll["day"]]
+                next_day_index = (day_index + 1) % 7
+                summary_dow = list(WEEKDAY_MAP.keys())[next_day_index]
+
             scheduler.add_job(
                 _schedule_summary_job,
                 trigger=CronTrigger(
-                    day_of_week=next_day,
+                    day_of_week=summary_dow,
                     hour=summary_hour,
                     minute=tg[1],
                     timezone=KALININGRAD_TZ
@@ -1191,4 +1211,5 @@ if __name__ == "__main__":
             continue
         else:
             break
+
 
