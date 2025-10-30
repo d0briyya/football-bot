@@ -15,7 +15,6 @@ import logging
 import signal
 import atexit
 from datetime import datetime, timedelta
-from functools import partial
 from typing import Optional, Tuple, Dict, Any
 
 try:
@@ -133,7 +132,6 @@ except Exception:
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "12f9f68ba8b0f873901522977cf20b5a")
 
 DATA_FILE = os.getenv("DATA_FILE", "bot_data.json")
-BACKUP_FILE = os.getenv("BACKUP_FILE", "bot_data_backup.json")
 PORT = int(os.getenv("PORT", 8080))
 LOCK_FILE = os.getenv("LOCK_FILE", "bot.lock")
 LOG_FILE = os.getenv("LOG_FILE", "bot.log")
@@ -995,6 +993,9 @@ def compute_next_poll_datetime() -> Optional[Tuple[datetime, Dict[str, Any]]]:
     for cfg in polls_config:
         day = cfg.get("day")
         if day not in WEEKDAY_MAP:
+            continue
+        # skip disabled days in next poll calculation
+        if day in disabled_days:
             continue
         hour, minute = map(int, cfg["time_poll"].split(":"))
         target = WEEKDAY_MAP[day]
