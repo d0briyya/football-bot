@@ -1,7 +1,7 @@
 aiogram==2.25.1
 apscheduler==3.11.0
 python-dotenv==1.1.1
-colorlog==6.8.2
-aiohttp
-pytz
-psutil
+aiohttp==3.9.5
+aiofiles==24.1.0
+pytz==2025.1
+psutil==6.1.0
