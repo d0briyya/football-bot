@@ -796,8 +796,8 @@ async def cmd_commands(message: types.Message) -> None:
         "/reload — обновить расписание\n"
         "/summary — отправить текущую сводку\n"
         "/backup — получить текущие данные (файл)\n"
-        "/disablepoll <день> — отключить автозапуск опроса (напр. вт/thu)\n"
-        "/enablepoll <день> — включить автозапуск опроса\n"
+        "/disablepoll &lt;день&gt; — отключить автозапуск опроса (напр. вт/thu)\n"
+        "/enablepoll &lt;день&gt; — включить автозапуск опроса\n"
         "/pollsstatus — показать отключённые дни\n"
     )
     await message.reply(text)
@@ -1191,3 +1191,4 @@ if __name__ == "__main__":
             continue
         else:
             break
+
