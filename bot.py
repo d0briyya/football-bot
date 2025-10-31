@@ -35,78 +35,19 @@ import aiohttp
 import aiofiles
 import html
 import random
+from typing import List
 
-WEATHER_MESSAGES = {
-    'clear': [
-        "🌞 Ну что, классика — солнце, мяч, поле! Плохая погода? Не, не слышали.",
-        "😎 Солнышко светит — футбол сам по себе праздник. Плохой погоды для нас не придумали!",
-        "☀️ На улице жара, а на поле будет ещё горячее. Берём воду, солнцезащитку и отличный настрой!",
-        "🌻 Для футбола такой день — просто мечта. Главное не забыть улыбку!",
-        "🌅 Погода топчик. Уже ощущаешь запах мяча в воздухе?",
-    ],
-    'cloud': [
-        "☁️ Облака? Так даже эпичнее будут голы! В пасмурную погоду выигрывает желание.",
-        "🌦 Немного пасмурно, но футболисты не сахар — не растаем точно!",
-        "⛅️ Для футбола не важно сколько на небе солнца, важно кто стоит у ворот!",
-        "🌥 Пасмурно, зато мяч будет хорошо видно — погнали!",
-        "☁️ Не бывает плохой погоды для футбола, бывает неправильная экипировка!",
-    ],
-    'rain': [
-        "☔️ Дождь — это бесплатный душ от вселенной! Поле мокрое, настрой — боевой!",
-        "🌧 Мокрый мяч — крутые подкаты! Погода только добавляет драйва.",
-        "🌦 На улице дождик? Считай повезло: мяч летит быстрее, эмоций — больше!",
-        "☔️ Если бы футболисты боялись воды, мы бы смотрели другие виды спорта!",
-        "💧 Дождь закаляет характер чемпионов — и очищает бутсы.",
-    ],
-    'storm': [
-        "⛈ Даже мы признаём: молния — не повод геройствовать. Если гроза — футбол откладываем!",
-        "🚨 Гроза на поле — момент, когда даже наш энтузиазм берёт паузу. Не рискуем!",
-        "⚡️ Для футбола нет плохой погоды... кроме той, что с молнией. Будьте осторожны!",
-        "⛈ В такую погоду даже VAR уходит в офлайн. Берегите себя!",
-        "⚠️ Нам всем хочется поиграть, но электричество — только для эмоций, не для поля!",
-    ],
-    'wind': [
-        "💨 Ветер? Это просто дополнительный игрок на поле! Ставим на точные подачи.",
-        "🌪 Мяч иногда будет подыгрывать — тренируем навесы!",
-        "🍃 Острота паса сегодня максимальная, ветер помогает атаке!",
-        "💨 Когда ветер дует в спину — пора делать дальние удары!",
-        "🥅 Главное, чтобы ворота не улетели — всё остальное не проблема!",
-    ],
-    'snow': [
-        "❄️ Снег украсит матч, а пару голов от разогрева только плюс!",
-        "☃️ Сугробы? Значит пора сыграть “ледяной финал”!",
-        "🌨 Даже снег — не повод отменять футбол. Замерзают только болельщики!",
-        "❄️ Белое поле — больше перчаток, больше эмоций, тот же футбол!",
-        "🧤 Мороз и солнце — по футбольному темпераменту сочетаются идеально!",
-    ],
-    'extreme': [
-        "🚨 Ливень и ветер сегодня сильнее всех на поле. Даже мы советуем остаться дома!",
-        "🌀 Такой шторм не выдержит даже судья — футбол отменяется!",
-        "🌊 “Для футбола нет плохой погоды” иногда требует здравого смысла. Сделаем паузу!",
-        "🚩 Сегодня на поле может унести даже капитанов — безопаснее устроить тактический разбор дома!",
-        "🛑 За окном апокалипсис, а мы слишком любим своих игроков, чтобы выпускать их в такое!",
-    ],
-}
+from ux import format_status_overview
+from weather import get_weather_forecast, pick_weather_message
+from state import now_tz, iso_now, WEEKDAY_MAP, KALININGRAD_TZ, normalize_day_key
+from persistence import save_data as _persist_save, load_data as _persist_load
+from scheduling import compute_poll_close_dt, compute_next_poll_datetime as _compute_next_poll_datetime
+from tg_utils import safe_telegram_call
+from scheduler_setup import setup_scheduler_jobs
+from handlers_setup import setup_error_handler
+from polls import find_last_active_poll, format_poll_votes
 
-def pick_weather_message(description: str) -> str:
-    desc = description.lower()
-    if any(w in desc for w in ["гроз", "бур", "шторм", "гроза", "ураган", "молни"]):
-        cat = 'storm' if "гроза" in desc or "молни" in desc else 'extreme'
-    elif any(w in desc for w in ["ливень", "ураган", "шторм", "апокалипсис", "ураган"]):
-        cat = 'extreme'
-    elif any(w in desc for w in ["дыру", "ветер", "порывист", "ветр"]):
-        cat = 'wind'
-    elif any(w in desc for w in ["снеж", "метел", "снег"]):
-        cat = 'snow'
-    elif any(w in desc for w in ["дожд", "морось", "ливень"]):
-        cat = 'rain'
-    elif any(w in desc for w in ["пасмурн", "облач", "туман"]):
-        cat = 'cloud'
-    elif any(w in desc for w in ["ясно", "солнеч", "ясн."]):
-        cat = 'clear'
-    else:
-        cat = 'clear'
-    return random.choice(WEATHER_MESSAGES[cat])
+ 
 
 # -------------------- Configuration --------------------
 load_dotenv()
@@ -215,7 +156,6 @@ ensure_single_instance()
 bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher(bot)
 
-KALININGRAD_TZ = timezone("Europe/Kaliningrad")
 # Планировщик создадим внутри main(), чтобы он корректно работал в том же event loop, что и aiogram
 scheduler: Optional[AsyncIOScheduler] = None
 
@@ -252,11 +192,7 @@ WEEKDAY_MAP = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun"
 TELEGRAM_MESSAGE_LIMIT = 4096
 
 # -------------------- Helpers --------------------
-def now_tz() -> datetime:
-    return datetime.now(KALININGRAD_TZ)
-
-def iso_now() -> str:
-    return now_tz().isoformat()
+ # now_tz, iso_now импортированы из app.state
 
 def is_admin(user_id: int) -> bool:
     try:
@@ -264,40 +200,9 @@ def is_admin(user_id: int) -> bool:
     except Exception:
         return False
 
-def find_last_active_poll() -> Optional[Tuple[str, Dict[str, Any]]]:
-    if not active_polls:
-        return None
-    items = sorted(active_polls.items(), key=lambda it: it[1].get("created_at", ""), reverse=True)
-    for pid, data in items:
-        if data.get("active"):
-            return pid, data
-    return None
+ # утилиты перенесены в app.polls
 
-def format_poll_votes(data: Dict[str, Any]) -> str:
-    votes = data.get("votes", {})
-    if not votes:
-        return "— Никто ещё не голосовал."
-    return "\n".join(f"{v.get('name')} — {v.get('answer')}" for v in votes.values())
-
-def normalize_day_key(day_str: str) -> Optional[str]:
-    if not day_str:
-        return None
-    s = day_str.strip().lower()
-    # Accept English short and Russian forms
-    ru_map = {
-        "пн": "mon", "пон": "mon", "понедельник": "mon",
-        "вт": "tue", "втор": "tue", "вторник": "tue",
-        "ср": "wed", "среда": "wed",
-        "чт": "thu", "чет": "thu", "четверг": "thu",
-        "пт": "fri", "пят": "fri", "пятница": "fri",
-        "сб": "sat", "суб": "sat", "суббота": "sat",
-        "вс": "sun", "вос": "sun", "воскресенье": "sun",
-    }
-    if s in WEEKDAY_MAP:
-        return s
-    if s in ru_map:
-        return ru_map[s]
-    return None
+ # normalize_day_key перенесён в app.state
 
 # -------------------- Persistence --------------------
 _next_save_allowed = 0
@@ -307,11 +212,7 @@ async def save_data() -> None:
         return
     _next_save_allowed = time.time() + 10
     try:
-        payload = {"active_polls": active_polls, "stats": stats, "disabled_days": sorted(list(disabled_days))}
-        tmp = DATA_FILE + ".tmp"
-        async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
-            await f.write(json.dumps(payload, ensure_ascii=False, indent=2))
-        os.replace(tmp, DATA_FILE)
+        await _persist_save(DATA_FILE, active_polls, stats, disabled_days)
         log.debug("Data saved to %s", DATA_FILE)
     except Exception:
         log.exception("Failed to save data")
@@ -320,16 +221,10 @@ async def load_data() -> None:
     global active_polls, stats
     if os.path.exists(DATA_FILE):
         try:
-            async with aiofiles.open(DATA_FILE, "r", encoding="utf-8") as f:
-                data = json.loads(await f.read())
-            active_polls = data.get("active_polls", {})
-            stats = data.get("stats", {})
-            # mini-game data ignored
-            dd = data.get("disabled_days", [])
-            if isinstance(dd, list):
-                for d in dd:
-                    if isinstance(d, str):
-                        disabled_days.add(d)
+            ap, st, dd = await _persist_load(DATA_FILE)
+            active_polls = ap
+            stats = st
+            disabled_days.clear(); disabled_days.update(dd)
             log.info("Loaded data: active_polls=%s, stats=%s, disabled_days=%s", len(active_polls), len(stats), sorted(list(disabled_days)))
         except Exception:
             log.exception("Failed to load data — starting with empty state")
@@ -346,59 +241,10 @@ def make_backup() -> None:
         log.exception("Failed to create backup")
 
 # -------------------- Telegram wrapper --------------------
-async def safe_telegram_call(func, *args, retries: int = 3, **kwargs):
-    """A resilient wrapper for Telegram API calls.
-    Handles FloodWait/RetryAfter specially and retries on transient errors.
-    Returns the call result or None on failure.
-    """
-    for attempt in range(1, retries + 1):
-        try:
-            return await func(*args, **kwargs)
-        except exceptions.RetryAfter as e:
-            wait = getattr(e, 'timeout', None) or getattr(e, 'retry_after', None) or 1
-            log.warning("RetryAfter (flood) — sleeping %s seconds", wait)
-            await asyncio.sleep(wait + 1)
-        except exceptions.TelegramAPIError as e:
-            log.warning("TelegramAPIError (attempt %s): %s", attempt, e)
-            if attempt == retries:
-                return None
-            await asyncio.sleep(1 + attempt)
-        except Exception:
-            log.exception("Unexpected exception during Telegram call (attempt %s)", attempt)
-            if attempt == retries:
-                return None
-            await asyncio.sleep(1 + attempt)
+# safe_telegram_call импортирован из app.telegram
 
 # -------------------- New helpers: compute poll close datetime & scheduling reminders --------------------
-def compute_poll_close_dt(poll: Dict[str, Any], start_dt: datetime) -> datetime:
-    """
-    Compute poll closing datetime using poll['day'] and poll['time_game'].
-    If poll['day']=='manual' or computation fails, fallback to start_dt + 24h.
-    """
-    try:
-        day = poll.get("day")
-        tg_hour, tg_minute = map(int, poll.get("time_game", "23:59").split(":"))
-        if day not in WEEKDAY_MAP:
-            # manual poll or unknown: default 24h lifetime
-            return start_dt + timedelta(hours=24)
-
-        target = WEEKDAY_MAP[day]
-        days_ahead = (target - start_dt.weekday()) % 7
-        base_date = start_dt.date() + timedelta(days=days_ahead)
-        # For Tue/Thu close at 1 hour before game time (e.g., 19:00 if game at 20:00)
-        close_hour = tg_hour - 1 if day in ("tue", "thu") else tg_hour
-        close_minute = tg_minute
-        if close_hour < 0:
-            close_hour = 0
-        base = datetime(base_date.year, base_date.month, base_date.day, close_hour, close_minute)
-        base_local = KALININGRAD_TZ.localize(base) if base.tzinfo is None else base.astimezone(KALININGRAD_TZ)
-        # Ensure close is after start; if not, assume next week
-        if base_local <= start_dt:
-            base_local = base_local + timedelta(days=7)
-        return base_local
-    except Exception:
-        log.exception("Failed to compute poll close dt for poll: %s", poll)
-        return start_dt + timedelta(hours=24)
+# compute_poll_close_dt импортирован из app.scheduling
 
 async def send_reminder_if_needed(poll_id: str) -> None:
     """Send reminder to CHAT_ID if yes_count < 10 for the poll."""
@@ -569,34 +415,12 @@ def schedule_poll_reminders(poll_id: str) -> None:
 
 # -------------------- Poll lifecycle --------------------
 # -------------------- Weather forecast --------------------
-async def get_weather_forecast(target_dt: datetime) -> Optional[str]:
-    """Возвращает краткий прогноз погоды с OpenWeather (3-hour forecast)."""
-    try:
-        api_key = OPENWEATHER_API_KEY
-        if not api_key:
-            log.warning("OPENWEATHER_API_KEY не установлен — прогноз погоды пропущен")
-            return None
-        city = "Zelenogradsk, Kaliningradskaya oblast, RU"
-        url = f"https://api.openweathermap.org/data/2.5/forecast?q={city}&appid={api_key}&units=metric&lang=ru"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status != 200:
-                    log.warning("OpenWeather API returned %s", resp.status)
-                    return None
-                data = await resp.json()
-        if not data.get("list"):
-            return None
-        # подбираем ближайший прогноз по времени
-        target_ts = int(target_dt.timestamp())
-        best = min(data["list"], key=lambda e: abs(e["dt"] - target_ts))
-        temp = best["main"]["temp"]
-        feels = best["main"].get("feels_like", temp)
-        desc = best["weather"][0]["description"].capitalize()
-        wind = best["wind"]["speed"]
-        return f"{desc}, 🌡 {temp:+.0f}°C (ощущается {feels:+.0f}°C), 💨 {wind} м/с"
-    except Exception:
-        log.exception("Failed to fetch weather")
+async def _get_weather(target_dt: datetime) -> Optional[str]:
+    """Адаптер для app.weather.get_weather_forecast с текущим ключом и городом."""
+    if not get_weather_forecast:
         return None
+    city = "Zelenogradsk, Kaliningradskaya oblast, RU"
+    return await get_weather_forecast(city, OPENWEATHER_API_KEY, target_dt)
 async def start_poll(poll: Dict[str, Any], from_admin: bool = False) -> None:
     """Create and register a poll. Ensures options count fits Telegram limits."""
     try:
@@ -617,7 +441,7 @@ async def start_poll(poll: Dict[str, Any], from_admin: bool = False) -> None:
             game_dt = KALININGRAD_TZ.localize(game_dt_naive)
         else:
             game_dt = now
-        weather = await get_weather_forecast(game_dt)
+        weather = await _get_weather(game_dt)
         msg = await safe_telegram_call(
             bot.send_poll,
             chat_id=CHAT_ID,
@@ -702,7 +526,7 @@ async def send_summary(poll_id: str) -> None:
             game_dt = KALININGRAD_TZ.localize(game_dt_naive)
         else:
             game_dt = now
-        weather = await get_weather_forecast(game_dt)
+        weather = await _get_weather(game_dt)
         weather_str = f"\n\n<b>Погода на момент игры:</b> {weather}" if weather else ""
         # ДОБАВЛЯЕМ блочок капитанов — если Вторник/Четверг и Да >=10
         captains_text = ""
@@ -796,8 +620,6 @@ async def handle_poll_answer(poll_answer: types.PollAnswer) -> None:
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: types.Message) -> None:
     await message.reply("👋 Привет! Я бот для организации игр на песчанке. Напиши /commands для списка команд.")
-    if not OPENWEATHER_API_KEY:
-        await bot.send_message(ADMIN_ID, "⚠️ Внимание: нет API ключа погоды. Прогноз не будет показываться.")
 
 @dp.message_handler(commands=["commands"])
 async def cmd_commands(message: types.Message) -> None:
@@ -848,7 +670,11 @@ async def cmd_status(message: types.Message) -> None:
         return await message.reply("📭 Активных опросов нет.")
     _, data = last
     poll = data["poll"]
-    await message.reply(f"<b>{poll['question']}</b>\n\n{format_poll_votes(data)}")
+    # Build emoji table: Yes/No/Maybe counts
+    votes = data.get("votes", {})
+    header_line = format_status_overview(data) if format_status_overview else ""
+    header = f"<b>{html.escape(poll['question'])}</b>\n\n" + header_line
+    await message.reply(header + format_poll_votes(data))
 
 @dp.message_handler(commands=["stats"])
 async def cmd_stats(message: types.Message) -> None:
@@ -990,6 +816,33 @@ async def cmd_summary(message: types.Message) -> None:
     await send_summary(pid)
     await message.reply("✅ Итог отправлен вручную.")
 
+@dp.message_handler(commands=["notify"])
+async def cmd_notify(message: types.Message) -> None:
+    """Admin-only: notify all current 'Да' voters in the last active poll.
+    Usage: /notify Текст сообщения
+    """
+    if not is_admin(message.from_user.id):
+        return await message.reply("❌ Нет прав.")
+    text = (message.get_args() or "").strip()
+    if not text:
+        return await message.reply("Использование: /notify Текст сообщения")
+    last = find_last_active_poll()
+    if not last:
+        return await message.reply("📭 Нет активных опросов.")
+    _, data = last
+    votes = data.get("votes", {})
+    yes_users = [v for v in votes.values() if str(v.get("answer","")) .startswith("Да") and v.get("user_id")]
+    if not yes_users:
+        return await message.reply("Никто не проголосовал 'Да'.")
+    mentions = []
+    for v in yes_users:
+        uid = int(v["user_id"])  # type: ignore
+        name = v.get("name") or str(uid)
+        mentions.append(_mention(uid, name))
+    msg = f"📣 <b>Оповещение для участников 'Да'</b>:\n{text}\n\n" + ", ".join(mentions)
+    await safe_telegram_call(bot.send_message, CHAT_ID, msg, parse_mode=ParseMode.HTML)
+    await message.reply("✅ Оповещение отправлено")
+
 @dp.message_handler(commands=["backup"])
 async def cmd_backup(message: types.Message) -> None:
     if not is_admin(message.from_user.id):
@@ -1007,25 +860,8 @@ async def cmd_backup(message: types.Message) -> None:
 
 # -------------------- Scheduler helpers --------------------
 def compute_next_poll_datetime() -> Optional[Tuple[datetime, Dict[str, Any]]]:
-    now = now_tz()
-    candidates = []
-    for cfg in polls_config:
-        day = cfg.get("day")
-        if day not in WEEKDAY_MAP:
-            continue
-        # skip disabled days in next poll calculation
-        if day in disabled_days:
-            continue
-        hour, minute = map(int, cfg["time_poll"].split(":"))
-        target = WEEKDAY_MAP[day]
-        days_ahead = (target - now.weekday()) % 7
-        dt = now_tz().replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=days_ahead)
-        if dt <= now:
-            dt += timedelta(days=7)
-        candidates.append((dt, cfg))
-    if not candidates:
-        return None
-    return sorted(candidates, key=lambda x: x[0])[0]
+    """Обёртка над app.scheduling.compute_next_poll_datetime для текущей конфигурации."""
+    return _compute_next_poll_datetime(polls_config, disabled_days)
 
 # Функции для APScheduler
 # ---
@@ -1039,68 +875,22 @@ def schedule_polls() -> None:
     if scheduler is None:
         log.error('Scheduler not initialized!')
         return
-    scheduler.remove_all_jobs()
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.get_event_loop()
-    for idx, poll in enumerate(polls_config):
-        try:
-            # skip disabled days
-            if poll.get("day") in disabled_days:
-                log.info("⏭️ Skipping scheduling for %s (disabled)", poll.get("day"))
-                continue
-            tp = list(map(int, poll["time_poll"].split(":")))
-            tg = list(map(int, poll["time_game"].split(":")))
-            poll_job_id = f"poll_{poll['day']}_{idx}"
-            scheduler.add_job(
-                _schedule_poll_job,
-                trigger=CronTrigger(
-                    day_of_week=poll["day"],
-                    hour=tp[0],
-                    minute=tp[1],
-                    timezone=KALININGRAD_TZ
-                ),
-                args=[poll],
-                id=poll_job_id
-            )
-            # корректное вычисление времени итогов
-            summary_hour = max(tg[0] - 1, 0)
-            summary_job_id = f"summary_{poll['day']}_{idx}"
-            if poll["day"] in ("tue", "thu"):
-                # Итоги в тот же день за час до игры (например, 19:00)
-                summary_dow = poll["day"]
-            else:
-                # Для пятницы: на следующий день (суббота) за час до игры
-                day_index = WEEKDAY_MAP[poll["day"]]
-                next_day_index = (day_index + 1) % 7
-                summary_dow = list(WEEKDAY_MAP.keys())[next_day_index]
-
-            scheduler.add_job(
-                _schedule_summary_job,
-                trigger=CronTrigger(
-                    day_of_week=summary_dow,
-                    hour=summary_hour,
-                    minute=tg[1],
-                    timezone=KALININGRAD_TZ
-                ),
-                args=[poll],
-                id=summary_job_id
-            )
-            log.info(f"✅ Scheduled poll for {poll['day']} at {poll['time_poll']} (Kaliningrad)")
-        except Exception:
-            log.exception("Failed to schedule poll: %s", poll)
-
-    try:
-        scheduler.add_job(lambda: asyncio.run_coroutine_threadsafe(save_data(), loop), "interval", minutes=10)
-    except Exception:
-        log.exception("Failed to schedule autosave job")
-
-    try:
-        scheduler.add_job(make_backup, "cron", hour=3, minute=0, timezone=KALININGRAD_TZ)
-    except Exception:
-        log.exception("Failed to schedule backup job")
-
+    def start_poll_cb(poll: dict):
+        asyncio.run_coroutine_threadsafe(start_poll(poll), asyncio.get_event_loop())
+    def send_summary_by_day_cb(poll: dict):
+        asyncio.run_coroutine_threadsafe(send_summary_by_day(poll), asyncio.get_event_loop())
+    def save_data_cb():
+        asyncio.run_coroutine_threadsafe(save_data(), asyncio.get_event_loop())
+    setup_scheduler_jobs(
+        scheduler,
+        polls_config,
+        disabled_days,
+        KALININGRAD_TZ,
+        start_poll_cb,
+        send_summary_by_day_cb,
+        save_data_cb,
+        log,
+    )
     log.info("Scheduler refreshed (timezone: Europe/Kaliningrad)")
     log.info("=== Запланированные задания ===")
     for job in scheduler.get_jobs():
@@ -1132,16 +922,7 @@ async def start_keepalive_server() -> None:
 
 
 # -------------------- Errors and shutdown --------------------
-@dp.errors_handler()
-async def global_errors(update, exception):
-    log.exception("Global error: %s", exception)
-    try:
-        await safe_telegram_call(bot.send_message, ADMIN_ID, f"⚠️ Ошибка: {exception}")
-    except exceptions.BotBlocked:
-        log.warning("Admin blocked the bot — can't send error message")
-    except Exception:
-        log.exception("Failed to notify admin about error")
-    return True
+# обработчик ошибок регистрируется через app.handlers.setup_error_handler
 
 async def shutdown() -> None:
     log.info("Shutting down...")
@@ -1207,12 +988,16 @@ async def main() -> None:
     except Exception:
         log.exception("Failed to start scheduler")
 
-    # notify admin
+    # notify admin once on startup
     await safe_telegram_call(bot.send_message, ADMIN_ID, "✅ Бот запущен и готов к работе!")
+    if not OPENWEATHER_API_KEY:
+        await safe_telegram_call(bot.send_message, ADMIN_ID, "⚠️ Внимание: отсутствует OPENWEATHER_API_KEY. Прогноз погоды показываться не будет.")
 
     # add signal handlers
     loop = asyncio.get_event_loop()
     _install_signal_handlers(loop)
+    # setup errors handler
+    setup_error_handler(dp, bot, ADMIN_ID, log)
 
     log.info("Start polling...")
     await dp.start_polling()
