@@ -226,6 +226,16 @@ START_TIME = datetime.now()
 active_polls: Dict[str, Dict[str, Any]] = {}
 stats: Dict[str, int] = {}
 disabled_days: set = set()
+game_stats: Dict[str, Dict[str, int]] = {}
+
+# -------------------- H2H Penalty Match State --------------------
+active_match: Optional[Dict[str, Any]] = None
+
+def _mention(user_id: int, name: str) -> str:
+    return f'<a href="tg://user?id={user_id}">{html.escape(name)}</a>'
+
+def _now_ts() -> float:
+    return time.time()
 
 # polls config (modifiable)
 polls_config = [
@@ -299,7 +309,7 @@ async def save_data() -> None:
         return
     _next_save_allowed = time.time() + 10
     try:
-        payload = {"active_polls": active_polls, "stats": stats, "disabled_days": sorted(list(disabled_days))}
+        payload = {"active_polls": active_polls, "stats": stats, "disabled_days": sorted(list(disabled_days)), "game_stats": game_stats}
         tmp = DATA_FILE + ".tmp"
         async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
             await f.write(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -316,12 +326,22 @@ async def load_data() -> None:
                 data = json.loads(await f.read())
             active_polls = data.get("active_polls", {})
             stats = data.get("stats", {})
+            gs = data.get("game_stats", {})
+            if isinstance(gs, dict):
+                game_stats.clear()
+                for k, v in gs.items():
+                    if isinstance(v, dict):
+                        game_stats[str(k)] = {
+                            "goals": int(v.get("goals", 0)),
+                            "shots": int(v.get("shots", 0)),
+                            "name": v.get("name", "") if isinstance(v.get("name", ""), str) else "",
+                        }
             dd = data.get("disabled_days", [])
             if isinstance(dd, list):
                 for d in dd:
                     if isinstance(d, str):
                         disabled_days.add(d)
-            log.info("Loaded data: active_polls=%s, stats=%s, disabled_days=%s", len(active_polls), len(stats), sorted(list(disabled_days)))
+            log.info("Loaded data: active_polls=%s, stats=%s, disabled_days=%s, game_players=%s", len(active_polls), len(stats), sorted(list(disabled_days)), len(game_stats))
         except Exception:
             log.exception("Failed to load data — starting with empty state")
     else:
@@ -811,6 +831,14 @@ async def cmd_commands(message: types.Message) -> None:
         "/disablepoll &lt;день&gt; — отключить автозапуск опроса (напр. вт/thu)\n"
         "/enablepoll &lt;день&gt; — включить автозапуск опроса\n"
         "/pollsstatus — показать отключённые дни\n"
+        "\nМини-игры:\n"
+        "/penalty — пробить пенальти и улучшить личную статистику\n"
+        "/topscorers — таблица бомбардиров мини-игры\n"
+        "/challenge @юзер — вызвать на серию пенальти (1 активная игра)\n"
+        "/accept — принять вызов\n"
+        "/decline — отклонить вызов\n"
+        "/stake beer|pushups — выбрать ставку (банка пива / 30 отжиманий)\n"
+        "/kick — пробить текущий удар (по очереди)\n"
     )
     await message.reply(text)
 
@@ -985,6 +1013,255 @@ async def cmd_backup(message: types.Message) -> None:
             await message.reply_document(f, caption="📦 Текущие данные бота")
     else:
         await message.reply("⚠️ Данных для бэкапа нет.")
+
+# -------------------- Mini-game: Penalty --------------------
+@dp.message_handler(commands=["penalty"])
+async def cmd_penalty(message: types.Message) -> None:
+    try:
+        uid = str(message.from_user.id)
+        name = message.from_user.full_name or message.from_user.first_name or uid
+        # initialize player
+        if uid not in game_stats:
+            game_stats[uid] = {"name": name, "goals": 0, "shots": 0}
+        # simulate shot: ~70% goal
+        import random as _rnd
+        outcome = _rnd.random()
+        game_stats[uid]["shots"] += 1
+        is_goal = outcome < 0.7
+        if is_goal:
+            game_stats[uid]["goals"] += 1
+            result_text = "⚽️ ГОООЛ! Вратарь даже не шелохнулся!"
+        else:
+            miss_variants = [
+                "🥅 Штанга! Чуть-чуть не хватило…",
+                "🧤 Вратарь берёт удар!",
+                "🔺 Перекладина! Публика ахнула…",
+                "↗️ Ушёл выше ворот…",
+            ]
+            result_text = _rnd.choice(miss_variants)
+        g = game_stats[uid]["goals"]
+        s = game_stats[uid]["shots"]
+        await save_data()
+        await message.reply(
+            f"{result_text}\n\nТвоя статистика: {g} ⚽ из {s} ударов."
+        )
+    except Exception:
+        log.exception("Error in /penalty")
+        await message.reply("⚠️ Ошибка при выполнении удара. Попробуйте ещё раз.")
+
+@dp.message_handler(commands=["topscorers"])
+async def cmd_topscorers(message: types.Message) -> None:
+    try:
+        if not game_stats:
+            return await message.reply("Пока никто не пробивал пенальти. Наберите /penalty")
+        # sort by goals desc, then by shots asc
+        top = sorted(game_stats.values(), key=lambda x: (-int(x.get("goals", 0)), int(x.get("shots", 0))))[:10]
+        lines = []
+        for i, p in enumerate(top, start=1):
+            lines.append(f"{i}. {html.escape(p.get('name','Игрок'))}: {int(p.get('goals',0))} ⚽ из {int(p.get('shots',0))}")
+        await message.reply("🏆 Таблица бомбардиров (мини-игра):\n" + "\n".join(lines))
+    except Exception:
+        log.exception("Error in /topscorers")
+        await message.reply("⚠️ Ошибка при показе таблицы бомбардиров.")
+
+# -------------------- H2H Penalty Match Commands --------------------
+def _reset_active_match():
+    global active_match
+    active_match = None
+
+def _format_match_score(m):
+    a = m["a"]; b = m["b"]
+    return f"{html.escape(a['name'])} {a['goals']}-{b['goals']} {html.escape(b['name'])}"
+
+def _match_is_expired(m) -> bool:
+    return _now_ts() - m.get("created_ts", _now_ts()) > 5*60
+
+@dp.message_handler(commands=["challenge"])
+async def cmd_challenge(message: types.Message) -> None:
+    global active_match
+    try:
+        if active_match and not _match_is_expired(active_match):
+            return await message.reply("⚠️ Уже идёт серия пенальти. Дождитесь окончания.")
+        # determine opponent from mention or reply
+        opponent = None
+        if message.reply_to_message and message.reply_to_message.from_user:
+            opponent = message.reply_to_message.from_user
+        else:
+            args = message.get_args().strip()
+            if args.startswith("@"):
+                # aiogram can't resolve @username to id reliably here; require reply or tag+id not trivial
+                # fallback: ask to reply
+                return await message.reply("Ответьте на сообщение соперника и введите /challenge")
+        if not opponent:
+            return await message.reply("Ответьте на сообщение соперника и введите /challenge")
+        if opponent.id == message.from_user.id:
+            return await message.reply("Нельзя вызвать самого себя")
+        challenger = message.from_user
+        active_match = {
+            "created_ts": _now_ts(),
+            "status": "pending",
+            "chat_id": message.chat.id,
+            "a": {"id": challenger.id, "name": challenger.full_name or challenger.first_name, "goals": 0, "shots": 0, "stake": None},
+            "b": {"id": opponent.id, "name": opponent.full_name or opponent.first_name, "goals": 0, "shots": 0, "stake": None},
+            "turn": None,
+            "sudden": False,
+        }
+        await message.reply(
+            f"🎮 Вызов на серию пенальти! {_mention(opponent.id, opponent.full_name or opponent.first_name)}, примите вызов командой /accept или отклоните /decline.\n"
+            f"Каждый выбирает ставку через /stake beer или /stake pushups. После подтверждения начнём. Время на игру — 5 минут."
+            , parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        log.exception("Error in /challenge")
+        await message.reply("⚠️ Ошибка при создании вызова")
+
+@dp.message_handler(commands=["accept"])
+async def cmd_accept(message: types.Message) -> None:
+    global active_match
+    try:
+        if not active_match or _match_is_expired(active_match):
+            _reset_active_match(); return await message.reply("Нет активного вызова")
+        m = active_match
+        if message.from_user.id != m["b"]["id"]:
+            return await message.reply("Принять вызов может только соперник")
+        m["status"] = "accepted"
+        await message.reply("✅ Вызов принят. Оба игрока выберите ставку: /stake beer или /stake pushups")
+    except Exception:
+        log.exception("Error in /accept")
+        await message.reply("⚠️ Ошибка при принятии вызова")
+
+@dp.message_handler(commands=["decline"])
+async def cmd_decline(message: types.Message) -> None:
+    global active_match
+    try:
+        if not active_match or _match_is_expired(active_match):
+            _reset_active_match(); return await message.reply("Нет активного вызова")
+        m = active_match
+        if message.from_user.id not in (m["a"]["id"], m["b"]["id"]):
+            return await message.reply("Отклонить может только участник пары")
+        await message.reply("❌ Вызов отклонён")
+        _reset_active_match()
+    except Exception:
+        log.exception("Error in /decline")
+        await message.reply("⚠️ Ошибка при отклонении вызова")
+
+@dp.message_handler(commands=["stake"])
+async def cmd_stake(message: types.Message) -> None:
+    global active_match
+    try:
+        if not active_match or _match_is_expired(active_match):
+            _reset_active_match(); return await message.reply("Нет активной игры")
+        m = active_match
+        if m["status"] not in ("pending", "accepted"):
+            return await message.reply("Ставку можно выбрать до старта игры")
+        arg = (message.get_args() or "").strip().lower()
+        if arg not in ("beer", "pushups"):
+            return await message.reply("Использование: /stake beer | /stake pushups")
+        player = None
+        if message.from_user.id == m["a"]["id"]:
+            player = m["a"]
+        elif message.from_user.id == m["b"]["id"]:
+            player = m["b"]
+        else:
+            return await message.reply("Только участники игры выбирают ставку")
+        player["stake"] = arg
+        await message.reply(f"✅ Ставка выбрана: {'🍺 пиво' if arg=='beer' else '💪 30 отжиманий'}")
+        if m["status"] == "accepted" and m["a"]["stake"] and m["b"]["stake"]:
+            # start game
+            m["status"] = "running"
+            # random who starts
+            import random as _r
+            m["turn"] = _r.choice(["a", "b"])
+            m["created_ts"] = _now_ts()  # reset timer for 5 minutes window
+            await message.reply(
+                "🏁 Игра началась! По 5 ударов каждому, потом серия до промаха.\n"
+                f"Первым бьёт: {html.escape(m[m['turn']]['name'])}. Используйте /kick по очереди.\n"
+                f"Ставки: {html.escape(m['a']['name'])} — {'🍺' if m['a']['stake']=='beer' else '💪'}, {html.escape(m['b']['name'])} — {'🍺' if m['b']['stake']=='beer' else '💪'}",
+                parse_mode=ParseMode.HTML
+            )
+    except Exception:
+        log.exception("Error in /stake")
+        await message.reply("⚠️ Ошибка при выборе ставки")
+
+def _apply_kick(m: Dict[str, Any], side: str) -> bool:
+    import random as _r
+    m[side]["shots"] += 1
+    is_goal = _r.random() < 0.7
+    if is_goal:
+        m[side]["goals"] += 1
+    return is_goal
+
+def _kicks_each_done(m) -> bool:
+    return m["a"]["shots"] >= 5 and m["b"]["shots"] >= 5
+
+def _winner_if_any(m) -> Optional[str]:
+    # return 'a' or 'b' if decided
+    if not _kicks_each_done(m):
+        return None
+    if m["a"]["goals"] != m["b"]["goals"]:
+        return 'a' if m["a"]["goals"] > m["b"]["goals"] else 'b'
+    return None
+
+@dp.message_handler(commands=["kick"])
+async def cmd_kick(message: types.Message) -> None:
+    global active_match
+    try:
+        if not active_match or _match_is_expired(active_match):
+            _reset_active_match(); return await message.reply("Нет активной игры")
+        m = active_match
+        if m["status"] != "running":
+            return await message.reply("Игра ещё не началась. Выберите ставки: /stake beer|pushups")
+        # only current player can kick
+        current_id = m[m["turn"]]["id"]
+        if message.from_user.id != current_id:
+            return await message.reply("Сейчас очередь соперника")
+        side = m["turn"]
+        is_goal = _apply_kick(m, side)
+        # update global personal mini-game stats as well
+        uid = str(current_id)
+        if uid not in game_stats:
+            game_stats[uid] = {"name": m[side]["name"], "goals": 0, "shots": 0}
+        game_stats[uid]["shots"] += 1
+        if is_goal:
+            game_stats[uid]["goals"] += 1
+        # build message
+        shot_num = m[side]["shots"]
+        text = ("⚽️ ГОООЛ!" if is_goal else "🧤 МИМО/СЕЙВ!") + f" Удар №{shot_num}. Счёт: {_format_match_score(m)}"
+        await message.reply(text, parse_mode=ParseMode.HTML)
+        await save_data()
+        # check decision after 5 each
+        winner = _winner_if_any(m)
+        if winner:
+            loser = 'b' if winner=='a' else 'a'
+            await message.reply(
+                f"🏆 Победа: {html.escape(m[winner]['name'])}! Проигравший {html.escape(m[loser]['name'])} выполняет свою ставку ({'🍺' if m[loser]['stake']=='beer' else '💪 30 отжиманий'})",
+                parse_mode=ParseMode.HTML
+            )
+            _reset_active_match()
+            return
+        # sudden death if 5 each and tie: need pair per round
+        if _kicks_each_done(m) and not m["sudden"]:
+            m["sudden"] = True
+            await message.reply("⚠️ Ничья после 5 ударов. СЕРИЯ ДО ПРОМАХА: бьём по очереди!")
+        elif m["sudden"]:
+            # if it's end of pair (i.e., after both have taken equal number in sudden), evaluate
+            a_shots = m["a"]["shots"]; b_shots = m["b"]["shots"]
+            if a_shots == b_shots:
+                if m["a"]["goals"] != m["b"]["goals"]:
+                    winner = 'a' if m["a"]["goals"] > m["b"]["goals"] else 'b'
+                    loser = 'b' if winner=='a' else 'a'
+                    await message.reply(
+                        f"🏆 Победа в серии до промаха: {html.escape(m[winner]['name'])}! Проигравший {html.escape(m[loser]['name'])} выполняет свою ставку ({'🍺' if m[loser]['stake']=='beer' else '💪 30 отжиманий'})",
+                        parse_mode=ParseMode.HTML
+                    )
+                    _reset_active_match()
+                    return
+        # switch turn
+        m["turn"] = 'b' if side=='a' else 'a'
+        await message.reply(f"Теперь бьёт: {html.escape(m[m['turn']]['name'])}", parse_mode=ParseMode.HTML)
+    except Exception:
+        log.exception("Error in /kick")
+        await message.reply("⚠️ Ошибка при ударе")
 
 # -------------------- Scheduler helpers --------------------
 def compute_next_poll_datetime() -> Optional[Tuple[datetime, Dict[str, Any]]]:
@@ -1212,5 +1489,4 @@ if __name__ == "__main__":
             continue
         else:
             break
-
 
