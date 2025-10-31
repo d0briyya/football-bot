@@ -289,24 +289,24 @@ async def tag_questionable_users(poll_id: str) -> None:
         now = now_tz()
         mins_left = int((close_dt - now).total_seconds() // 60) if close_dt else None
 
+        # Собираем всех 'под вопросом' и отправляем одно общее сообщение (без спама)
+        questionable_mentions = []
         for v in votes.values():
             answer = v.get("answer", "")
             if "под" in answer.lower() or "под вопрос" in answer.lower() or "?" in answer:
                 user_id = v.get("user_id")
                 name = v.get("name", "Участник")
                 safe_name = html.escape(name)
-                if not user_id:
-                    # we can't mention without user_id; fallback to using plain name
-                    text = f"{safe_name}, ⚠️ вы отметили 'Под вопросом'. Осталось {mins_left} минут до закрытия опроса. Пожалуйста, подтвердите участие."
-                    await safe_telegram_call(bot.send_message, CHAT_ID, text, parse_mode=ParseMode.HTML)
-                    await asyncio.sleep(0.3)
-                    log.debug("Tagged by name (no user_id) for poll %s: %s", poll_id, name)
+                if user_id:
+                    questionable_mentions.append(f'<a href="tg://user?id={user_id}">{safe_name}</a>')
                 else:
-                    mention = f'<a href="tg://user?id={user_id}">{safe_name}</a>'
-                    text = f"{mention}, ⚠️ вы отметили 'Под вопросом'. Осталось {mins_left} минут до закрытия опроса. Пожалуйста, подтвердите участие."
-                    await safe_telegram_call(bot.send_message, CHAT_ID, text, parse_mode=ParseMode.HTML)
-                    await asyncio.sleep(0.3)
-                    log.debug("Mentioned user %s for poll %s", user_id, poll_id)
+                    questionable_mentions.append(safe_name)
+        if questionable_mentions:
+            header = "⚠️ Напоминание участникам 'Под вопросом'"
+            left = f"Осталось {mins_left} минут до закрытия." if mins_left is not None else "Скоро закрытие."
+            text = f"{header}\n{left}\nПожалуйста, подтвердите участие: " + ", ".join(questionable_mentions)
+            await safe_telegram_call(bot.send_message, CHAT_ID, text, parse_mode=ParseMode.HTML)
+            log.debug("Tagged %s questionable users for poll %s", len(questionable_mentions), poll_id)
     except Exception:
         log.exception("Error in tag_questionable_users for poll %s", poll_id)
 
@@ -322,9 +322,6 @@ def schedule_poll_reminders(poll_id: str) -> None:
         if not data:
             return
         poll = data.get("poll", {})
-        # Only for Tue and Thu per request
-        if poll.get("day") not in ("tue", "thu"):
-            return
 
         global scheduler
         if scheduler is None:
@@ -332,7 +329,28 @@ def schedule_poll_reminders(poll_id: str) -> None:
             return
         loop = asyncio.get_event_loop()
         start_dt = now_tz()
-        close_dt = compute_poll_close_dt(poll, start_dt)
+        # Вычислим close_dt: при наличии manual_close_* используем их, иначе общую логику
+        mclose_day = poll.get("manual_close_day")
+        mclose_time = poll.get("manual_close_time")
+        if mclose_day or mclose_time:
+            try:
+                c_day = mclose_day or poll.get("day")
+                tg = (mclose_time or poll.get("time_game", "23:59"))
+                tg_hour, tg_minute = map(int, tg.split(":"))
+                target = WEEKDAY_MAP.get(c_day, None)
+                if target is None:
+                    close_dt = start_dt + timedelta(hours=24)
+                else:
+                    days_ahead = (target - start_dt.weekday()) % 7
+                    base_date = start_dt.date() + timedelta(days=days_ahead)
+                    base = datetime(base_date.year, base_date.month, base_date.day, tg_hour, tg_minute)
+                    close_dt = KALININGRAD_TZ.localize(base) if base.tzinfo is None else base.astimezone(KALININGRAD_TZ)
+                    if close_dt <= start_dt:
+                        close_dt = close_dt + timedelta(days=7)
+            except Exception:
+                close_dt = start_dt + timedelta(hours=24)
+        else:
+            close_dt = compute_poll_close_dt(poll, start_dt)
         # safety: ensure at least 2 hours duration, otherwise fallback to start+24h
         if close_dt <= start_dt + timedelta(minutes=5):
             close_dt = start_dt + timedelta(hours=24)
@@ -348,37 +366,30 @@ def schedule_poll_reminders(poll_id: str) -> None:
         tag_job_id = f"tagq_{poll_id}"
         close_job_id = f"close_{poll_id}"
 
-        # schedule reminder every 3 hours from start to close
-        try:
-            # remove previous if exists
+        # schedule reminder каждые 3 часа только если это вт/чт и нет ручного закрытия
+        if poll.get("day") in ("tue", "thu") and not (mclose_day or mclose_time):
             try:
-                scheduler.remove_job(reminder_job_id)
+                try:
+                    scheduler.remove_job(reminder_job_id)
+                except Exception:
+                    pass
+                scheduler.add_job(
+                    lambda pid=poll_id: asyncio.run_coroutine_threadsafe(send_reminder_if_needed(pid), loop),
+                    trigger="interval",
+                    hours=3,
+                    start_date=start_dt,
+                    end_date=close_dt,
+                    id=reminder_job_id,
+                )
+                log.info("Scheduled 3h reminders for poll %s from %s to %s", poll_id, start_dt, close_dt)
             except Exception:
-                pass
-            scheduler.add_job(
-                lambda pid=poll_id: asyncio.run_coroutine_threadsafe(send_reminder_if_needed(pid), loop),
-                trigger="interval",
-                hours=3,
-                start_date=start_dt,
-                end_date=close_dt,
-                id=reminder_job_id,
-            )
-            log.info("Scheduled 3h reminders for poll %s from %s to %s", poll_id, start_dt, close_dt)
-        except Exception:
-            log.exception("Failed to schedule 3h reminders for poll %s", poll_id)
+                log.exception("Failed to schedule 3h reminders for poll %s", poll_id)
 
         # schedule tagging: for Tue/Thu from 17:40 to 19:00 every 20 minutes; otherwise 30 minutes last 2h
+        # Теггинг «Под вопросом»: каждые 20 минут за 2 часа до закрытия, единым сообщением
         try:
-            poll_day = poll.get("day")
-            if poll_day in ("tue", "thu"):
-                # compute 17:40 same day (Kaliningrad)
-                tag_start_local = close_dt.replace(hour=17, minute=40, second=0, microsecond=0)
-                # ensure not before start
-                tag_start = max(start_dt, tag_start_local)
-                interval_minutes = 20
-            else:
-                tag_start = max(start_dt, close_dt - timedelta(hours=2))
-                interval_minutes = 30
+            tag_start = max(start_dt, close_dt - timedelta(hours=2))
+            interval_minutes = 20
             try:
                 scheduler.remove_job(tag_job_id)
             except Exception:
@@ -391,7 +402,7 @@ def schedule_poll_reminders(poll_id: str) -> None:
                 end_date=close_dt,
                 id=tag_job_id,
             )
-            log.info("Scheduled tagging (%sm) for poll %s from %s to %s", interval_minutes, poll_id, tag_start, close_dt)
+            log.info("Scheduled tagging (20m) for poll %s from %s to %s", poll_id, tag_start, close_dt)
         except Exception:
             log.exception("Failed to schedule tagging for poll %s", poll_id)
         # Автоматическое закрытие опроса — добавить после всех scheduler.add_job
@@ -696,10 +707,38 @@ async def cmd_uptime(message: types.Message) -> None:
 async def cmd_startpoll(message: types.Message) -> None:
     if not is_admin(message.from_user.id):
         return await message.reply("❌ Нет прав.")
-    parts = [p.strip() for p in message.get_args().split("|") if p.strip()]
-    if len(parts) < 3:
-        return await message.reply("Формат: /startpoll Вопрос | Вариант1 | Вариант2 | ...")
-    poll = {"day": "manual", "time_poll": now_tz().strftime("%H:%M"), "question": parts[0], "options": parts[1:]}
+    raw_parts = [p.strip() for p in message.get_args().split("|") if p.strip()]
+    if len(raw_parts) < 2:
+        return await message.reply(
+            "Формат: /startpoll Вопрос | Вариант1 | Вариант2 | ... | day=tue time=20:00 close_day=tue close_time=19:00 (последний блок опц.)"
+        )
+    # Выделим опциональные токены вида key=value из последнего блока (если есть)
+    tokens = {}
+    if raw_parts and any('=' in seg for seg in raw_parts[-1].split()):
+        for tok in raw_parts[-1].split():
+            if '=' in tok:
+                k, v = tok.split('=', 1)
+                tokens[k.strip().lower()] = v.strip()
+        raw_parts = raw_parts[:-1]
+    if len(raw_parts) < 2:
+        return await message.reply("Нужно указать вопрос и хотя бы один вариант ответа.")
+    question = raw_parts[0]
+    options = raw_parts[1:]
+    # Подготовим поля дня/времени
+    day_key = normalize_day_key(tokens.get('day', '') or '') or 'manual'
+    time_game = tokens.get('time', now_tz().strftime('%H:%M'))
+    manual_close_day = normalize_day_key(tokens.get('close_day', '') or '') if tokens.get('close_day') else None
+    manual_close_time = tokens.get('close_time') if tokens.get('close_time') else None
+    poll = {
+        "day": day_key,
+        "time_poll": now_tz().strftime("%H:%M"),
+        "time_game": time_game,
+        "question": question,
+        "options": options,
+    }
+    if manual_close_day or manual_close_time:
+        poll["manual_close_day"] = manual_close_day
+        poll["manual_close_time"] = manual_close_time
     await start_poll(poll, from_admin=True)
     await message.reply("✅ Опрос создан вручную.")
 
