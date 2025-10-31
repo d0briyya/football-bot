@@ -226,15 +226,8 @@ START_TIME = datetime.now()
 active_polls: Dict[str, Dict[str, Any]] = {}
 stats: Dict[str, int] = {}
 disabled_days: set = set()
-game_stats: Dict[str, Dict[str, int]] = {}
-# penalty enforcement state
-pending_penalties: Dict[str, Dict[str, Any]] = {}
-banned_users: Dict[str, float] = {}
 
-# -------------------- H2H Penalty Match State --------------------
-active_match: Optional[Dict[str, Any]] = None
-# per-user mini-game session visibility/flow
-mini_game_sessions: Dict[str, Dict[str, Any]] = {}
+# -------------------- Mini-game removed --------------------
 
 def _mention(user_id: int, name: str) -> str:
     return f'<a href="tg://user?id={user_id}">{html.escape(name)}</a>'
@@ -314,7 +307,7 @@ async def save_data() -> None:
         return
     _next_save_allowed = time.time() + 10
     try:
-        payload = {"active_polls": active_polls, "stats": stats, "disabled_days": sorted(list(disabled_days)), "game_stats": game_stats, "pending_penalties": pending_penalties, "banned_users": banned_users}
+        payload = {"active_polls": active_polls, "stats": stats, "disabled_days": sorted(list(disabled_days))}
         tmp = DATA_FILE + ".tmp"
         async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
             await f.write(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -331,36 +324,13 @@ async def load_data() -> None:
                 data = json.loads(await f.read())
             active_polls = data.get("active_polls", {})
             stats = data.get("stats", {})
-            gs = data.get("game_stats", {})
-            if isinstance(gs, dict):
-                game_stats.clear()
-                for k, v in gs.items():
-                    if isinstance(v, dict):
-                        game_stats[str(k)] = {
-                            "goals": int(v.get("goals", 0)),
-                            "shots": int(v.get("shots", 0)),
-                            "name": v.get("name", "") if isinstance(v.get("name", ""), str) else "",
-                        }
-            pp = data.get("pending_penalties", {})
-            if isinstance(pp, dict):
-                pending_penalties.clear()
-                for k, v in pp.items():
-                    if isinstance(v, dict):
-                        pending_penalties[str(k)] = v
-            bu = data.get("banned_users", {})
-            if isinstance(bu, dict):
-                banned_users.clear()
-                for k, v in bu.items():
-                    try:
-                        banned_users[str(k)] = float(v)
-                    except Exception:
-                        continue
+            # mini-game data ignored
             dd = data.get("disabled_days", [])
             if isinstance(dd, list):
                 for d in dd:
                     if isinstance(d, str):
                         disabled_days.add(d)
-            log.info("Loaded data: active_polls=%s, stats=%s, disabled_days=%s, game_players=%s", len(active_polls), len(stats), sorted(list(disabled_days)), len(game_stats))
+            log.info("Loaded data: active_polls=%s, stats=%s, disabled_days=%s", len(active_polls), len(stats), sorted(list(disabled_days)))
         except Exception:
             log.exception("Failed to load data — starting with empty state")
     else:
@@ -831,7 +801,6 @@ async def cmd_start(message: types.Message) -> None:
 
 @dp.message_handler(commands=["commands"])
 async def cmd_commands(message: types.Message) -> None:
-    uid = str(message.from_user.id)
     isadm = is_admin(message.from_user.id)
     lines = [
         "Список доступных команд:\n",
@@ -842,20 +811,6 @@ async def cmd_commands(message: types.Message) -> None:
         "/uptime — время работы бота",
         "/commands — справка",
     ]
-    # Mini-game commands visibility
-    session = mini_game_sessions.get(uid)
-    if session:
-        lines.append("")
-        lines.append("Мини-игра:")
-        # Показываем только вход в игру и завершение; остальное — кнопками в UI
-        lines.append("/play — открыть меню мини-игры (кнопки)")
-        lines.append("/cancelgame — завершить мини-игру")
-        # Для информации можно оставить таблицу
-        lines.append("/topscorers — таблица бомбардиров мини-игры")
-    else:
-        lines.append("")
-        lines.append("Мини-игра:")
-        lines.append("/play — начать мини-игру и открыть меню действий")
     if isadm:
         lines.extend([
             "",
@@ -870,7 +825,6 @@ async def cmd_commands(message: types.Message) -> None:
             "/disablepoll &lt;день&gt; — отключить автоопрос (напр. вт/thu)",
             "/enablepoll &lt;день&gt; — включить автоопрос",
             "/pollsstatus — показать отключённые дни",
-            "/forgive — снять бан за отжимания",
         ])
     await message.reply("\n".join(lines))
 
@@ -1046,393 +1000,10 @@ async def cmd_backup(message: types.Message) -> None:
     else:
         await message.reply("⚠️ Данных для бэкапа нет.")
 
-@dp.message_handler(commands=["forgive"])
-async def cmd_forgive(message: types.Message) -> None:
-    try:
-        if not is_admin(message.from_user.id):
-            return await message.reply("❌ Нет прав.")
-        # accept reply target or @username not supported => reply required
-        target = None
-        if message.reply_to_message and message.reply_to_message.from_user:
-            target = message.reply_to_message.from_user
-        if not target:
-            return await message.reply("Ответьте на сообщение игрока и введите /forgive")
-        uid = str(target.id)
-        if uid in banned_users:
-            banned_users.pop(uid, None)
-        if uid in pending_penalties:
-            pending_penalties.pop(uid, None)
-        await save_data()
-        await message.reply(f"✅ {html.escape(target.full_name or str(target.id))} реабилитирован и снова может играть.", parse_mode=ParseMode.HTML)
-    except Exception:
-        log.exception("Error in /forgive")
-        await message.reply("⚠️ Ошибка при разблокировке")
+# mini-game commands removed
 
-# -------------------- Mini-game: Penalty --------------------
-@dp.message_handler(commands=["play"])
-async def cmd_play(message: types.Message) -> None:
-    try:
-        uid = str(message.from_user.id)
-        if str(message.from_user.id) in banned_users and _now_ts() < banned_users[str(message.from_user.id)]:
-            return await message.reply("⛔ Вы временно не можете играть в мини-игры. Обратитесь к администратору или выполните ранее назначенное наказание.")
-        mini_game_sessions[uid] = {"started": True, "ts": _now_ts(), "awaiting_opponent": False}
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton(text="🎯 Выбрать соперника", callback_data="play_choose_opponent"))
-        kb.add(types.InlineKeyboardButton(text="📣 Открытый вызов", callback_data="play_open_call"))
-        kb.add(types.InlineKeyboardButton(text="⏹ Завершить", callback_data="play_cancel"))
-        await message.reply(
-            "🎮 Мини-игра запущена! Выберите действие кнопкой ниже:",
-            reply_markup=kb
-        )
-    except Exception:
-        log.exception("Error in /play")
-        await message.reply("⚠️ Ошибка при запуске мини-игры")
-
-@dp.message_handler(commands=["cancelgame"])
-async def cmd_cancelgame(message: types.Message) -> None:
-    try:
-        uid = str(message.from_user.id)
-        mini_game_sessions.pop(uid, None)
-        await message.reply("⏹ Мини-игра завершена. Чтобы начать снова — /game")
-    except Exception:
-        log.exception("Error in /cancelgame")
-        await message.reply("⚠️ Ошибка при завершении мини-игры")
-@dp.message_handler(commands=["penalty"])
-async def cmd_penalty(message: types.Message) -> None:
-    try:
-        # block banned users
-        if str(message.from_user.id) in banned_users and _now_ts() < banned_users[str(message.from_user.id)]:
-            return await message.reply("⛔ Вы временно не можете играть в мини-игры. Обратитесь к администратору или выполните ранее назначенное наказание.")
-        # require started session
-        if str(message.from_user.id) not in mini_game_sessions:
-            return await message.reply("Сначала начните мини-игру командой /play")
-        uid = str(message.from_user.id)
-        name = message.from_user.full_name or message.from_user.first_name or uid
-        # initialize player
-        if uid not in game_stats:
-            game_stats[uid] = {"name": name, "goals": 0, "shots": 0}
-        # simulate shot: ~70% goal
-        import random as _rnd
-        outcome = _rnd.random()
-        game_stats[uid]["shots"] += 1
-        is_goal = outcome < 0.7
-        if is_goal:
-            game_stats[uid]["goals"] += 1
-            result_text = "⚽️ ГОООЛ! Вратарь даже не шелохнулся!"
-        else:
-            miss_variants = [
-                "🥅 Штанга! Чуть-чуть не хватило…",
-                "🧤 Вратарь берёт удар!",
-                "🔺 Перекладина! Публика ахнула…",
-                "↗️ Ушёл выше ворот…",
-            ]
-            result_text = _rnd.choice(miss_variants)
-        g = game_stats[uid]["goals"]
-        s = game_stats[uid]["shots"]
-        await save_data()
-        await message.reply(
-            f"{result_text}\n\nТвоя статистика: {g} ⚽ из {s} ударов."
-        )
-    except Exception:
-        log.exception("Error in /penalty")
-        await message.reply("⚠️ Ошибка при выполнении удара. Попробуйте ещё раз.")
-
-@dp.message_handler(commands=["topscorers"])
-async def cmd_topscorers(message: types.Message) -> None:
-    try:
-        # allow viewing without session; but guide if empty
-        if not game_stats:
-            return await message.reply("Пока никто не пробивал пенальти. Наберите /play и следуйте кнопкам")
-        # sort by goals desc, then by shots asc
-        top = sorted(game_stats.values(), key=lambda x: (-int(x.get("goals", 0)), int(x.get("shots", 0))))[:10]
-        lines = []
-        for i, p in enumerate(top, start=1):
-            lines.append(f"{i}. {html.escape(p.get('name','Игрок'))}: {int(p.get('goals',0))} ⚽ из {int(p.get('shots',0))}")
-        await message.reply("🏆 Таблица бомбардиров (мини-игра):\n" + "\n".join(lines))
-    except Exception:
-        log.exception("Error in /topscorers")
-        await message.reply("⚠️ Ошибка при показе таблицы бомбардиров.")
-
-# -------------------- H2H Penalty Match Commands --------------------
-def _reset_active_match():
-    global active_match
-    active_match = None
-
-def _format_match_score(m):
-    a = m["a"]; b = m["b"]
-    return f"{html.escape(a['name'])} {a['goals']}-{b['goals']} {html.escape(b['name'])}"
-
-def _match_is_expired(m) -> bool:
-    return _now_ts() - m.get("created_ts", _now_ts()) > 5*60
-
-@dp.message_handler(commands=["challenge"])
-async def cmd_challenge(message: types.Message) -> None:
-    global active_match
-    try:
-        # bans
-        if str(message.from_user.id) in banned_users and _now_ts() < banned_users[str(message.from_user.id)]:
-            return await message.reply("⛔ Вы временно не можете играть в мини-игры.")
-        # challenger must have a started session
-        if str(message.from_user.id) not in mini_game_sessions:
-            return await message.reply("Сначала начните мини-игру командой /play")
-        if active_match and not _match_is_expired(active_match):
-            return await message.reply("⚠️ Уже идёт серия пенальти. Дождитесь окончания.")
-        # determine opponent from mention or reply
-        opponent = None
-        if message.reply_to_message and message.reply_to_message.from_user:
-            opponent = message.reply_to_message.from_user
-        else:
-            args = message.get_args().strip()
-            if args.startswith("@"):
-                # aiogram can't resolve @username to id reliably here; require reply or tag+id not trivial
-                # fallback: ask to reply
-                return await message.reply("Ответьте на сообщение соперника и введите /challenge")
-        if not opponent:
-            return await message.reply("Ответьте на сообщение соперника и введите /challenge")
-        if opponent.id == message.from_user.id:
-            return await message.reply("Нельзя вызвать самого себя")
-        challenger = message.from_user
-        active_match = {
-            "created_ts": _now_ts(),
-            "status": "pending",
-            "chat_id": message.chat.id,
-            "a": {"id": challenger.id, "name": challenger.full_name or challenger.first_name, "goals": 0, "shots": 0, "stake": None},
-            "b": {"id": opponent.id, "name": opponent.full_name or opponent.first_name, "goals": 0, "shots": 0, "stake": None},
-            "turn": None,
-            "sudden": False,
-            "accept_deadline": _now_ts() + 60,
-            "stake_deadline": None,
-            "game_deadline": None,
-            "last_action_ts": _now_ts(),
-        }
-        await message.reply(
-            f"🎮 Вызов на серию пенальти! {_mention(opponent.id, opponent.full_name or opponent.first_name)}, примите вызов командой /accept или отклоните /decline.\n"
-            f"Каждый выбирает ставку через /stake beer или /stake pushups. После подтверждения начнём. Время на игру — 5 минут."
-            , parse_mode=ParseMode.HTML
-        )
-    except Exception:
-        log.exception("Error in /challenge")
-        await message.reply("⚠️ Ошибка при создании вызова")
-
-@dp.message_handler(commands=["accept"])
-async def cmd_accept(message: types.Message) -> None:
-    global active_match
-    try:
-        if str(message.from_user.id) in banned_users and _now_ts() < banned_users[str(message.from_user.id)]:
-            return await message.reply("⛔ Вы временно не можете играть в мини-игры.")
-        if not active_match or _match_is_expired(active_match):
-            _reset_active_match(); return await message.reply("Нет активного вызова")
-        m = active_match
-        if message.from_user.id != m["b"]["id"]:
-            return await message.reply("Принять вызов может только соперник")
-        if _now_ts() > m.get("accept_deadline", 0):
-            _reset_active_match(); return await message.reply("⏰ Время на принятие вызова истекло")
-        m["status"] = "accepted"
-        m["stake_deadline"] = _now_ts() + 120
-        await message.reply("✅ Вызов принят. Оба игрока выберите ставку: /stake beer или /stake pushups")
-    except Exception:
-        log.exception("Error in /accept")
-        await message.reply("⚠️ Ошибка при принятии вызова")
-
-@dp.message_handler(commands=["decline"])
-async def cmd_decline(message: types.Message) -> None:
-    global active_match
-    try:
-        if not active_match or _match_is_expired(active_match):
-            _reset_active_match(); return await message.reply("Нет активного вызова")
-        m = active_match
-        if message.from_user.id not in (m["a"]["id"], m["b"]["id"]):
-            return await message.reply("Отклонить может только участник пары")
-        await message.reply("❌ Вызов отклонён")
-        _reset_active_match()
-    except Exception:
-        log.exception("Error in /decline")
-        await message.reply("⚠️ Ошибка при отклонении вызова")
-
-@dp.message_handler(commands=["stake"])
-async def cmd_stake(message: types.Message) -> None:
-    global active_match
-    try:
-        if str(message.from_user.id) in banned_users and _now_ts() < banned_users[str(message.from_user.id)]:
-            return await message.reply("⛔ Вы временно не можете играть в мини-игры.")
-        if not active_match or _match_is_expired(active_match):
-            _reset_active_match(); return await message.reply("Нет активной игры")
-        m = active_match
-        if m["status"] not in ("pending", "accepted"):
-            return await message.reply("Ставку можно выбрать до старта игры")
-        if m.get("stake_deadline") and _now_ts() > m["stake_deadline"]:
-            _reset_active_match(); return await message.reply("⏰ Время на выбор ставки истекло")
-        arg = (message.get_args() or "").strip().lower()
-        if arg not in ("beer", "pushups"):
-            return await message.reply("Использование: /stake beer | /stake pushups")
-        player = None
-        if message.from_user.id == m["a"]["id"]:
-            player = m["a"]
-        elif message.from_user.id == m["b"]["id"]:
-            player = m["b"]
-        else:
-            return await message.reply("Только участники игры выбирают ставку")
-        player["stake"] = arg
-        await message.reply(f"✅ Ставка выбрана: {'🍺 пиво' if arg=='beer' else '💪 30 отжиманий'}")
-        if m["status"] == "accepted" and m["a"]["stake"] and m["b"]["stake"]:
-            # start game
-            m["status"] = "running"
-            # random who starts
-            import random as _r
-            m["turn"] = _r.choice(["a", "b"])
-            m["created_ts"] = _now_ts()  # reset timer for 5 minutes window
-            m["game_deadline"] = _now_ts() + 5*60
-            m["last_action_ts"] = _now_ts()
-            await message.reply(
-                "🏁 Игра началась! По 5 ударов каждому, потом серия до промаха.\n"
-                f"Первым бьёт: {html.escape(m[m['turn']]['name'])}. Используйте /kick по очереди.\n"
-                f"Ставки: {html.escape(m['a']['name'])} — {'🍺' if m['a']['stake']=='beer' else '💪'}, {html.escape(m['b']['name'])} — {'🍺' if m['b']['stake']=='beer' else '💪'}",
-                parse_mode=ParseMode.HTML
-            )
-            # Try to lock chat: disable messages for all, allow two players and admin
-            try:
-                await bot.set_chat_permissions(m["chat_id"], types.ChatPermissions(can_send_messages=False))
-                for uid in (m["a"]["id"], m["b"]["id"], ADMIN_ID):
-                    try:
-                        await bot.restrict_chat_member(m["chat_id"], uid, types.ChatPermissions(can_send_messages=True))
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-    except Exception:
-        log.exception("Error in /stake")
-        await message.reply("⚠️ Ошибка при выборе ставки")
-
-def _apply_kick(m: Dict[str, Any], side: str) -> bool:
-    import random as _r
-    m[side]["shots"] += 1
-    is_goal = _r.random() < 0.7
-    if is_goal:
-        m[side]["goals"] += 1
-    return is_goal
-
-def _kicks_each_done(m) -> bool:
-    return m["a"]["shots"] >= 5 and m["b"]["shots"] >= 5
-
-def _winner_if_any(m) -> Optional[str]:
-    # return 'a' or 'b' if decided
-    if not _kicks_each_done(m):
-        return None
-    if m["a"]["goals"] != m["b"]["goals"]:
-        return 'a' if m["a"]["goals"] > m["b"]["goals"] else 'b'
-    return None
-
-@dp.message_handler(commands=["kick"])
-async def cmd_kick(message: types.Message) -> None:
-    global active_match
-    try:
-        if str(message.from_user.id) in banned_users and _now_ts() < banned_users[str(message.from_user.id)]:
-            return await message.reply("⛔ Вы временно не можете играть в мини-игры.")
-        if not active_match or _match_is_expired(active_match):
-            _reset_active_match(); return await message.reply("Нет активной игры")
-        m = active_match
-        if m["status"] != "running":
-            return await message.reply("Игра ещё не началась. Выберите ставки: /stake beer|pushups")
-        if m.get("game_deadline") and _now_ts() > m["game_deadline"]:
-            # timeout finish
-            await message.reply("⏰ Время игры истекло. Игра отменена.")
-            try:
-                await bot.set_chat_permissions(m["chat_id"], types.ChatPermissions(can_send_messages=True))
-            except Exception:
-                pass
-            _reset_active_match()
-            return
-        # per-kick timeout 30s
-        if _now_ts() - m.get("last_action_ts", _now_ts()) > 30:
-            return await message.reply("⏰ Слишком долго ждём удар. Сделайте /kick сейчас.")
-        # only current player can kick
-        current_id = m[m["turn"]]["id"]
-        if message.from_user.id != current_id:
-            return await message.reply("Сейчас очередь соперника")
-        side = m["turn"]
-        is_goal = _apply_kick(m, side)
-        # update global personal mini-game stats as well
-        uid = str(current_id)
-        if uid not in game_stats:
-            game_stats[uid] = {"name": m[side]["name"], "goals": 0, "shots": 0}
-        game_stats[uid]["shots"] += 1
-        if is_goal:
-            game_stats[uid]["goals"] += 1
-        # build message
-        shot_num = m[side]["shots"]
-        text = ("⚽️ ГОООЛ!" if is_goal else "🧤 МИМО/СЕЙВ!") + f" Удар №{shot_num}. Счёт: {_format_match_score(m)}"
-        await message.reply(text, parse_mode=ParseMode.HTML)
-        m["last_action_ts"] = _now_ts()
-        await save_data()
-        # check decision after 5 each
-        winner = _winner_if_any(m)
-        if winner:
-            loser = 'b' if winner=='a' else 'a'
-            await message.reply(
-                f"🏆 Победа: {html.escape(m[winner]['name'])}! Проигравший {html.escape(m[loser]['name'])} выполняет свою ставку ({'🍺' if m[loser]['stake']=='beer' else '💪 30 отжиманий'})",
-                parse_mode=ParseMode.HTML
-            )
-            # enqueue penalty if pushups
-            if m[loser]['stake'] == 'pushups':
-                pending_penalties[str(m[loser]['id'])] = {
-                    'due_ts': _now_ts() + 10*60,
-                    'chat_id': m['chat_id'],
-                    'name': m[loser]['name'],
-                }
-                try:
-                    # schedule enforcement
-                    if scheduler:
-                        lid = f"penalty_{m[loser]['id']}_{int(_now_ts())}"
-                        scheduler.add_job(lambda uid=m[loser]['id']: asyncio.run_coroutine_threadsafe(enforce_penalty(uid), asyncio.get_event_loop()), trigger='date', run_date=datetime.fromtimestamp(_now_ts()+10*60, tz=KALININGRAD_TZ), id=lid)
-                except Exception:
-                    pass
-                await message.reply(f"🎥 {html.escape(m[loser]['name'])}, у вас 10 минут, чтобы скинуть видео отжиманий сюда.", parse_mode=ParseMode.HTML)
-            try:
-                await bot.set_chat_permissions(m["chat_id"], types.ChatPermissions(can_send_messages=True))
-            except Exception:
-                pass
-            _reset_active_match()
-            return
-        # sudden death if 5 each and tie: need pair per round
-        if _kicks_each_done(m) and not m["sudden"]:
-            m["sudden"] = True
-            await message.reply("⚠️ Ничья после 5 ударов. СЕРИЯ ДО ПРОМАХА: бьём по очереди!")
-        elif m["sudden"]:
-            # if it's end of pair (i.e., after both have taken equal number in sudden), evaluate
-            a_shots = m["a"]["shots"]; b_shots = m["b"]["shots"]
-            if a_shots == b_shots:
-                if m["a"]["goals"] != m["b"]["goals"]:
-                    winner = 'a' if m["a"]["goals"] > m["b"]["goals"] else 'b'
-                    loser = 'b' if winner=='a' else 'a'
-                    await message.reply(
-                        f"🏆 Победа в серии до промаха: {html.escape(m[winner]['name'])}! Проигравший {html.escape(m[loser]['name'])} выполняет свою ставку ({'🍺' if m[loser]['stake']=='beer' else '💪 30 отжиманий'})",
-                        parse_mode=ParseMode.HTML
-                    )
-                    if m[loser]['stake'] == 'pushups':
-                        pending_penalties[str(m[loser]['id'])] = {
-                            'due_ts': _now_ts() + 10*60,
-                            'chat_id': m['chat_id'],
-                            'name': m[loser]['name'],
-                        }
-                        try:
-                            if scheduler:
-                                lid = f"penalty_{m[loser]['id']}_{int(_now_ts())}"
-                                scheduler.add_job(lambda uid=m[loser]['id']: asyncio.run_coroutine_threadsafe(enforce_penalty(uid), asyncio.get_event_loop()), trigger='date', run_date=datetime.fromtimestamp(_now_ts()+10*60, tz=KALININGRAD_TZ), id=lid)
-                        except Exception:
-                            pass
-                        await message.reply(f"🎥 {html.escape(m[loser]['name'])}, у вас 10 минут, чтобы скинуть видео отжиманий сюда.", parse_mode=ParseMode.HTML)
-                    try:
-                        await bot.set_chat_permissions(m["chat_id"], types.ChatPermissions(can_send_messages=True))
-                    except Exception:
-                        pass
-                    _reset_active_match()
-                    return
-        # switch turn
-        m["turn"] = 'b' if side=='a' else 'a'
-        await message.reply(f"Теперь бьёт: {html.escape(m[m['turn']]['name'])}", parse_mode=ParseMode.HTML)
-    except Exception:
-        log.exception("Error in /kick")
-        await message.reply("⚠️ Ошибка при ударе")
+# -------------------- Mini-game removed --------------------
+# mini-game handlers removed
 
 # -------------------- Scheduler helpers --------------------
 def compute_next_poll_datetime() -> Optional[Tuple[datetime, Dict[str, Any]]]:
@@ -1557,40 +1128,7 @@ async def start_keepalive_server() -> None:
             log.exception("Failed to start KeepAlive server")
             raise
 
-@dp.message_handler(content_types=[types.ContentType.VIDEO, types.ContentType.VIDEO_NOTE])
-async def handle_video_penalty(message: types.Message) -> None:
-    try:
-        uid = str(message.from_user.id)
-        pen = pending_penalties.get(uid)
-        if not pen:
-            return
-        if _now_ts() > pen.get('due_ts', 0):
-            return
-        # mark done
-        pending_penalties.pop(uid, None)
-        await save_data()
-        await message.reply("✅ Наказание выполнено. Спасибо!")
-    except Exception:
-        log.exception("Error in handle_video_penalty")
-
-async def enforce_penalty(user_id: int) -> None:
-    try:
-        uid = str(user_id)
-        pen = pending_penalties.get(uid)
-        if not pen:
-            return
-        if _now_ts() <= pen.get('due_ts', 0):
-            return
-        pending_penalties.pop(uid, None)
-        # ban from games for 24h (soft ban: block game commands)
-        banned_users[uid] = _now_ts() + 24*3600
-        await save_data()
-        try:
-            await bot.send_message(pen['chat_id'], f"⏰ Время вышло! {html.escape(pen.get('name','Игрок'))} не выполнил(а) отжимания. Доступ к мини-играм ограничен на 24 часа. Для снятия — пришлите видео или админ может /forgive.")
-        except Exception:
-            pass
-    except Exception:
-        log.exception("Error in enforce_penalty")
+# mini-game enforcement removed
 
 
 # -------------------- Errors and shutdown --------------------
@@ -1694,5 +1232,3 @@ if __name__ == "__main__":
             continue
         else:
             break
-
-
