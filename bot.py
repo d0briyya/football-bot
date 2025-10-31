@@ -233,6 +233,8 @@ banned_users: Dict[str, float] = {}
 
 # -------------------- H2H Penalty Match State --------------------
 active_match: Optional[Dict[str, Any]] = None
+# per-user mini-game session visibility/flow
+mini_game_sessions: Dict[str, Dict[str, Any]] = {}
 
 def _mention(user_id: int, name: str) -> str:
     return f'<a href="tg://user?id={user_id}">{html.escape(name)}</a>'
@@ -829,36 +831,55 @@ async def cmd_start(message: types.Message) -> None:
 
 @dp.message_handler(commands=["commands"])
 async def cmd_commands(message: types.Message) -> None:
-    text = (
-        "Список доступных команд:\n\n"
-        "Для всех:\n"
-        "/status — показать текущий опрос\n"
-        "/stats — статистика «Да ✅»\n"
-        "/nextpoll — когда следующий опрос\n"
-        "/uptime — время работы бота\n"
-        "/commands — справка\n\n"
-        "Для администратора:\n"
-        "/startpoll Вопрос | Вариант1 | Вариант2 | ...\n"
-        "/closepoll — закрыть опрос\n"
-        "/addplayer Имя — добавить игрока\n"
-        "/removeplayer Имя — удалить игрока\n"
-        "/reload — обновить расписание\n"
-        "/summary — отправить текущую сводку\n"
-        "/backup — получить текущие данные (файл)\n"
-        "/disablepoll &lt;день&gt; — отключить автозапуск опроса (напр. вт/thu)\n"
-        "/enablepoll &lt;день&gt; — включить автозапуск опроса\n"
-        "/pollsstatus — показать отключённые дни\n"
-        "\nМини-игры:\n"
-        "/penalty — пробить пенальти и улучшить личную статистику\n"
-        "/topscorers — таблица бомбардиров мини-игры\n"
-        "/challenge @юзер — вызвать на серию пенальти (1 активная игра)\n"
-        "/accept — принять вызов\n"
-        "/decline — отклонить вызов\n"
-        "/stake beer|pushups — выбрать ставку (банка пива / 30 отжиманий)\n"
-        "/kick — пробить текущий удар (по очереди)\n"
-        "/forgive @юзер — админ снимает бан за невыполнение отжиманий\n"
-    )
-    await message.reply(text)
+    uid = str(message.from_user.id)
+    isadm = is_admin(message.from_user.id)
+    lines = [
+        "Список доступных команд:\n",
+        "Для всех:",
+        "/status — показать текущий опрос",
+        "/stats — статистика «Да ✅»",
+        "/nextpoll — когда следующий опрос",
+        "/uptime — время работы бота",
+        "/commands — справка",
+    ]
+    # Mini-game commands visibility
+    session = mini_game_sessions.get(uid)
+    if session:
+        lines.append("")
+        lines.append("Мини-игра:")
+        # After start, show next logical steps
+        # Always allow to cancel
+        lines.append("/cancelgame — завершить мини-игру")
+        # Solo flow
+        lines.append("/penalty — пробить пенальти (личная статистика)")
+        lines.append("/topscorers — таблица бомбардиров мини-игры")
+        # H2H flow (creation requires challenger session)
+        lines.append("/challenge — вызвать соперника (ответом на его сообщение)")
+        lines.append("/accept — принять вызов (только сопернику)")
+        lines.append("/decline — отклонить вызов")
+        lines.append("/stake beer|pushups — выбрать ставку")
+        lines.append("/kick — выполнить удар по очереди")
+    else:
+        lines.append("")
+        lines.append("Мини-игра:")
+        lines.append("/game — начать мини-игру и увидеть доступные действия")
+    if isadm:
+        lines.extend([
+            "",
+            "Для администратора:",
+            "/startpoll Вопрос | Вариант1 | Вариант2 | ...",
+            "/closepoll — закрыть опрос",
+            "/addplayer Имя — добавить игрока",
+            "/removeplayer Имя — удалить игрока",
+            "/reload — обновить расписание",
+            "/summary — отправить текущую сводку",
+            "/backup — получить текущие данные (файл)",
+            "/disablepoll <день> — отключить автоопрос (напр. вт/thu)",
+            "/enablepoll <день> — включить автоопрос",
+            "/pollsstatus — показать отключённые дни",
+            "/forgive — снять бан за отжимания",
+        ])
+    await message.reply("\n".join(lines))
 
 @dp.message_handler(commands=["nextpoll"])
 async def cmd_nextpoll(message: types.Message) -> None:
@@ -1055,12 +1076,42 @@ async def cmd_forgive(message: types.Message) -> None:
         await message.reply("⚠️ Ошибка при разблокировке")
 
 # -------------------- Mini-game: Penalty --------------------
+@dp.message_handler(commands=["game"])
+async def cmd_game(message: types.Message) -> None:
+    try:
+        uid = str(message.from_user.id)
+        if str(message.from_user.id) in banned_users and _now_ts() < banned_users[str(message.from_user.id)]:
+            return await message.reply("⛔ Вы временно не можете играть в мини-игры. Обратитесь к администратору или выполните ранее назначенное наказание.")
+        mini_game_sessions[uid] = {"started": True, "ts": _now_ts()}
+        await message.reply(
+            "🎮 Мини-игра запущена!\n\n"
+            "Доступные действия теперь видны в /commands.\n"
+            "• Для одиночной попытки — используйте /penalty\n"
+            "• Для дуэли — ответьте на сообщение соперника и введите /challenge\n"
+            "• Завершить мини-игру: /cancelgame"
+        )
+    except Exception:
+        log.exception("Error in /game")
+        await message.reply("⚠️ Ошибка при запуске мини-игры")
+
+@dp.message_handler(commands=["cancelgame"])
+async def cmd_cancelgame(message: types.Message) -> None:
+    try:
+        uid = str(message.from_user.id)
+        mini_game_sessions.pop(uid, None)
+        await message.reply("⏹ Мини-игра завершена. Чтобы начать снова — /game")
+    except Exception:
+        log.exception("Error in /cancelgame")
+        await message.reply("⚠️ Ошибка при завершении мини-игры")
 @dp.message_handler(commands=["penalty"])
 async def cmd_penalty(message: types.Message) -> None:
     try:
         # block banned users
         if str(message.from_user.id) in banned_users and _now_ts() < banned_users[str(message.from_user.id)]:
             return await message.reply("⛔ Вы временно не можете играть в мини-игры. Обратитесь к администратору или выполните ранее назначенное наказание.")
+        # require started session
+        if str(message.from_user.id) not in mini_game_sessions:
+            return await message.reply("Сначала начните мини-игру командой /game")
         uid = str(message.from_user.id)
         name = message.from_user.full_name or message.from_user.first_name or uid
         # initialize player
@@ -1095,8 +1146,9 @@ async def cmd_penalty(message: types.Message) -> None:
 @dp.message_handler(commands=["topscorers"])
 async def cmd_topscorers(message: types.Message) -> None:
     try:
+        # allow viewing without session; but guide if empty
         if not game_stats:
-            return await message.reply("Пока никто не пробивал пенальти. Наберите /penalty")
+            return await message.reply("Пока никто не пробивал пенальти. Наберите /game, затем /penalty")
         # sort by goals desc, then by shots asc
         top = sorted(game_stats.values(), key=lambda x: (-int(x.get("goals", 0)), int(x.get("shots", 0))))[:10]
         lines = []
@@ -1126,6 +1178,9 @@ async def cmd_challenge(message: types.Message) -> None:
         # bans
         if str(message.from_user.id) in banned_users and _now_ts() < banned_users[str(message.from_user.id)]:
             return await message.reply("⛔ Вы временно не можете играть в мини-игры.")
+        # challenger must have a started session
+        if str(message.from_user.id) not in mini_game_sessions:
+            return await message.reply("Сначала начните мини-игру командой /game")
         if active_match and not _match_is_expired(active_match):
             return await message.reply("⚠️ Уже идёт серия пенальти. Дождитесь окончания.")
         # determine opponent from mention or reply
@@ -1645,3 +1700,5 @@ if __name__ == "__main__":
             continue
         else:
             break
+
+
