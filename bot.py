@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """ Refactored and hardened Telegram bot (aiogram 2.x) — improved by ChatGPT (senior-style)
 Key improvements made: ...
 Note: keep environment variables: TG_BOT_TOKEN, TG_CHAT_ID, TG_ADMIN_ID, PORT
@@ -1700,5 +1699,7 @@ if __name__ == "__main__":
             continue
         else:
             break
+
+
 
 
