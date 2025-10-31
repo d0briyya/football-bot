@@ -665,7 +665,7 @@ async def cmd_nextpoll(message: types.Message) -> None:
 
 @dp.message_handler(commands=["status"])
 async def cmd_status(message: types.Message) -> None:
-    last = find_last_active_poll()
+    last = find_last_active_poll(active_polls)
     if not last:
         return await message.reply("📭 Активных опросов нет.")
     _, data = last
@@ -714,7 +714,7 @@ async def send_summary_by_day(poll: dict):
 async def cmd_closepoll(message: types.Message) -> None:
     if not is_admin(message.from_user.id):
         return await message.reply("❌ Нет прав.")
-    last = find_last_active_poll()
+    last = find_last_active_poll(active_polls)
     if not last:
         return await message.reply("📭 Нет активных опросов.")
     pid, data = last
@@ -728,7 +728,7 @@ async def cmd_addplayer(message: types.Message) -> None:
     name = message.get_args().strip()
     if not name:
         return await message.reply("Использование: /addplayer Имя")
-    last = find_last_active_poll()
+    last = find_last_active_poll(active_polls)
     if not last:
         return await message.reply("📭 Нет активных опросов.")
     pid, data = last
@@ -744,7 +744,7 @@ async def cmd_removeplayer(message: types.Message) -> None:
     name = message.get_args().strip()
     if not name:
         return await message.reply("Использование: /removeplayer Имя")
-    last = find_last_active_poll()
+    last = find_last_active_poll(active_polls)
     if not last:
         return await message.reply("📭 Нет активных опросов.")
     pid, data = last
@@ -809,7 +809,7 @@ async def cmd_pollsstatus(message: types.Message) -> None:
 async def cmd_summary(message: types.Message) -> None:
     if not is_admin(message.from_user.id):
         return await message.reply("❌ Нет прав.")
-    last = find_last_active_poll()
+    last = find_last_active_poll(active_polls)
     if not last:
         return await message.reply("📭 Нет активных опросов.")
     pid, data = last
@@ -826,7 +826,7 @@ async def cmd_notify(message: types.Message) -> None:
     text = (message.get_args() or "").strip()
     if not text:
         return await message.reply("Использование: /notify Текст сообщения")
-    last = find_last_active_poll()
+    last = find_last_active_poll(active_polls)
     if not last:
         return await message.reply("📭 Нет активных опросов.")
     _, data = last
