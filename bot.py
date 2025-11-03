@@ -1163,7 +1163,19 @@ async def main() -> None:
         await safe_telegram_call(bot.send_message, ADMIN_ID, "⚠️ Внимание: отсутствует OPENWEATHER_API_KEY. Прогноз погоды показываться не будет.")
     
     # setup duel handlers
-    setup_duel_handlers(dp, bot, scheduler, safe_telegram_call)
+    def check_active_tue_thu_poll() -> bool:
+        """Проверить, есть ли активный опрос для вторника или четверга."""
+        try:
+            last = find_last_active_poll(active_polls)
+            if not last:
+                return False
+            _, data = last
+            poll_day = data.get("poll", {}).get("day", "")
+            return poll_day in ("tue", "thu")
+        except Exception:
+            return False
+    
+    setup_duel_handlers(dp, bot, scheduler, safe_telegram_call, check_active_tue_thu_poll)
     
     # add signal handlers
     loop = asyncio.get_event_loop()
