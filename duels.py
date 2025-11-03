@@ -78,6 +78,37 @@ async def async_remove_timeout_notify(user_id: int, chat_id: int, name: str, bot
 def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_func) -> None:
     """Регистрация всех хендлеров для дуэлей."""
     
+    async def _expire_duel_if_pending(bot: Bot) -> None:
+        global active_duel
+        try:
+            if active_duel and active_duel.get("status") == "pending":
+                chat_id = active_duel.get("chat_id")
+                await bot.send_message(chat_id, "⌛ Вызов на дуэль просрочен (10 минут). Дуэль отменена.")
+                active_duel = None
+        except Exception:
+            import logging
+            logging.getLogger("bot").exception("Failed to expire pending duel")
+
+    async def _expire_revanch_if_pending(bot: Bot) -> None:
+        global revanch_pending
+        try:
+            if revanch_pending:
+                chat_id = revanch_pending.get("chat_id")
+                loser_name = revanch_pending.get("loser_name", "Проигравший")
+                winner_name = revanch_pending.get("winner_name", "Победитель")
+                await bot.send_message(
+                    chat_id,
+                    (
+                        f"⏳ {_mention(revanch_pending['winner_id'], winner_name)} не ответил на реванш вовремя.\n"
+                        f"{_mention(revanch_pending['winner_id'], winner_name)} решил не рисковать и остаётся победителем."
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+                revanch_pending = None
+        except Exception:
+            import logging
+            logging.getLogger("bot").exception("Failed to expire pending revanch")
+
     @dp.message_handler(commands=["duel"])
     async def cmd_duel(message: types.Message) -> None:
         """Команда вызова на дуэль: /duel @username"""
@@ -86,15 +117,18 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
             # Проверка на активную дуэль
             if active_duel:
                 return await message.reply("⚔️ Сейчас уже идёт дуэль! Подожди окончания боя, чтобы начать новую.")
-            # Проверка на ожидающий реванш
-            if revanch_pending:
-                return await message.reply("⚔️ Ожидается ответ на реванш! Подожди окончания.")
+            # Новые дуэли разрешены, даже если в чате ожидается решение по другому реваншу
             
             challenger = message.from_user
             
             # Проверка таймаута вызывающего
             if is_user_in_timeout(challenger.id):
-                return await message.reply("⛔ Ты сейчас в таймауте и не можешь вызывать на дуэль!")
+                # Полный запрет на взаимодействие: удаляем сообщение с командой
+                try:
+                    await bot.delete_message(message.chat.id, message.message_id)
+                except Exception:
+                    pass
+                return
             
             # Определение соперника
             opponent = None
@@ -155,6 +189,21 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                 reply_markup=kb,
                 parse_mode=ParseMode.HTML,
             )
+            # Запланировать авто-сброс вызова через 10 минут, если не принят
+            if scheduler:
+                try:
+                    expire_job_id = f"duel_expire_{int(active_duel['created_ts'])}"
+                    active_duel["expire_job_id"] = expire_job_id
+                    run_dt = datetime.fromtimestamp(active_duel["created_ts"] + 10*60, tz=KALININGRAD_TZ)
+                    scheduler.add_job(
+                        lambda: asyncio.run_coroutine_threadsafe(_expire_duel_if_pending(bot), asyncio.get_event_loop()),
+                        trigger='date',
+                        run_date=run_dt,
+                        id=expire_job_id,
+                    )
+                except Exception:
+                    import logging
+                    logging.getLogger("bot").exception("Failed to schedule duel expire job")
         except Exception:
             import logging
             logging.getLogger("bot").exception("Error in /duel")
@@ -186,6 +235,13 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
             # Удаляем кнопки
             try:
                 await bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+            except Exception:
+                pass
+            # Отменяем джобу истечения ожидания принятия
+            try:
+                if scheduler and active_duel.get("expire_job_id"):
+                    scheduler.remove_job(active_duel["expire_job_id"]) 
+                    active_duel.pop("expire_job_id", None)
             except Exception:
                 pass
             
@@ -237,7 +293,7 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                 active_duel["loser_id"] = loser_id
                 active_duel["loser_name"] = loser_name
                 active_duel["finished"] = True
-                # Отправляем проигравшему ЛС с предложением реванша
+                # Публикуем в беседе компактное приглашение на реванш с кнопкой (нажать сможет только проигравший)
                 kb_revanch = types.InlineKeyboardMarkup()
                 kb_revanch.add(types.InlineKeyboardButton(
                     text="⚔️ Реванш!",
@@ -245,17 +301,27 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                 ))
                 try:
                     await bot.send_message(
-                        loser_id,
-                        (
-                            "Ты проиграл дуэль. Можешь запросить <b>один</b> реванш.\n\n"
-                            "Если выиграешь — твой штраф в 30 минут <b>снимется</b>, соперник получит <b>1 час</b>.\n"
-                            "Если проиграешь — получишь <b>2 часа</b>, право на реванш пропадёт."
-                        ),
+                        active_duel["chat_id"],
+                        f"↩️ {_mention(loser_id, loser_name)}, можешь взять реванш (один раз).",
                         reply_markup=kb_revanch,
                         parse_mode=ParseMode.HTML,
                     )
                 except Exception:
                     pass
+                # Планируем истечение права реванша через 1 минуту
+                if scheduler:
+                    try:
+                        rev_expire_job_id = f"rev_expire_{int(_now_ts())}"
+                        active_duel["rev_expire_job_id"] = rev_expire_job_id
+                        run_dt = datetime.fromtimestamp(_now_ts() + 60, tz=KALININGRAD_TZ)
+                        scheduler.add_job(
+                            lambda: asyncio.run_coroutine_threadsafe(_expire_revanch_if_pending(bot), asyncio.get_event_loop()),
+                            trigger='date',
+                            run_date=run_dt,
+                            id=rev_expire_job_id,
+                        )
+                    except Exception:
+                        pass
             else:
                 # Сброс активной дуэли
                 active_duel = None
@@ -376,6 +442,21 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                 await bot.send_message(call.message.chat.id, rules_text, reply_markup=kb, parse_mode=ParseMode.HTML)
             except Exception:
                 pass
+            # Планируем истечение времени на принятие реванша (1 минута для победителя)
+            if scheduler:
+                try:
+                    rev_decision_job_id = f"rev_decide_{int(_now_ts())}"
+                    # сохраним, чтобы отменить при accept/decline
+                    revanch_pending["rev_decision_job_id"] = rev_decision_job_id
+                    run_dt = datetime.fromtimestamp(_now_ts() + 60, tz=KALININGRAD_TZ)
+                    scheduler.add_job(
+                        lambda: asyncio.run_coroutine_threadsafe(_expire_revanch_if_pending(bot), asyncio.get_event_loop()),
+                        trigger='date',
+                        run_date=run_dt,
+                        id=rev_decision_job_id,
+                    )
+                except Exception:
+                    pass
             
         except Exception:
             import logging
@@ -432,6 +513,13 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                 "is_revanch": True,
                 "finished": False,
             }
+            # Отменяем джобу истечения реванша, если была
+            try:
+                if scheduler and active_duel.get("rev_expire_job_id"):
+                    scheduler.remove_job(active_duel["rev_expire_job_id"]) 
+                    active_duel.pop("rev_expire_job_id", None)
+            except Exception:
+                pass
             
             # Помечаем, что право на реванш использовано
             revange_used[str(revanch_pending["loser_id"])] = True
@@ -516,6 +604,10 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
             
             if loser_id_from_cb != revanch_pending["loser_id"]:
                 return await call.answer("Этот запрос не для тебя", show_alert=True)
+
+            # Отклонить реванш может только победитель (к кому реванш обращён)
+            if call.from_user.id != revanch_pending["winner_id"]:
+                return await call.answer("Отклонить может только соперник, к которому обращён реванш", show_alert=True)
             
             await call.answer()
             
@@ -541,12 +633,8 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
     @dp.message_handler(content_types=types.ContentType.ANY)
     async def handle_timeout_messages(message: types.Message) -> None:
         """Блокировать новые сообщения от пользователей в таймауте (кроме команд)."""
-        # Пропускаем команды
-        if message.text and message.text.startswith('/'):
-            return
-        
         if is_user_in_timeout(message.from_user.id):
-            # Блокируем только новые сообщения (удаляем их, старые не трогаем)
+            # Блокируем любые сообщения и команды от пользователя в таймауте
             try:
                 await bot.delete_message(message.chat.id, message.message_id)
             except Exception:
