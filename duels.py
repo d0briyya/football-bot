@@ -23,6 +23,7 @@ revanch_used_for_duel: set = set()  # set of keys loser:winner:token used
 duel_daily_count: Dict[str, Dict[str, Any]] = {}  # user_id -> {date: 'YYYYMMDD', count: int}
 revanch_pending: Optional[Dict[str, Any]] = None  # Ожидающее предложение реванша
 revange_used: Dict[str, bool] = {}  # user_id -> использовал ли этот пользователь право на реванш (одноразовое)
+duels_enabled: bool = True  # Флаг включения/выключения дуэлей (админ может управлять)
 
 def _now_ts() -> float:
     """Текущий timestamp."""
@@ -140,8 +141,12 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
     @dp.message_handler(commands=["duel"])
     async def cmd_duel(message: types.Message) -> None:
         """Команда вызова на дуэль: /duel @username"""
-        global active_duel, revanch_pending
+        global active_duel, revanch_pending, duels_enabled
         try:
+            # Проверка, включены ли дуэли
+            if not duels_enabled:
+                return await message.reply("⛔ Дуэли временно отключены администратором.")
+            
             # Проверка на активную дуэль
             if active_duel:
                 return await message.reply("⚔️ Сейчас уже идёт дуэль! Подожди окончания боя, чтобы начать новую.")
@@ -701,4 +706,14 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                 await bot.delete_message(message.chat.id, message.message_id)
             except Exception:
                 pass
+
+# Функции для управления флагом дуэлей (используются из bot.py)
+def set_duels_enabled(enabled: bool) -> None:
+    """Установить состояние дуэлей (включено/выключено)."""
+    global duels_enabled
+    duels_enabled = bool(enabled)
+
+def get_duels_enabled() -> bool:
+    """Получить текущее состояние дуэлей."""
+    return duels_enabled
 

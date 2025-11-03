@@ -46,7 +46,7 @@ from tg_utils import safe_telegram_call
 from scheduler_setup import setup_scheduler_jobs
 from handlers_setup import setup_error_handler
 from polls import find_last_active_poll, format_poll_votes
-from duels import setup_duel_handlers, is_user_in_timeout, remove_timeout, username_to_userid
+from duels import setup_duel_handlers, is_user_in_timeout, remove_timeout, username_to_userid, set_duels_enabled, get_duels_enabled
 
  
 
@@ -674,6 +674,7 @@ async def cmd_commands(message: types.Message) -> None:
             "/notify Текст — оповестить всех 'Да ✅'",
             "/say Текст — отправить сообщение от имени бота",
             "/qreminders on|off — вкл/выкл напоминания для 'Под вопросом'",
+            "/duels on|off — вкл/выкл дуэли",
             "/unmute — размутить пользователя (ответьте на его сообщение)",
         ])
     await message.reply("\n".join(lines))
@@ -997,6 +998,25 @@ async def cmd_qreminders(message: types.Message) -> None:
     await message.reply(
         "Статус: " + ("ВКЛЮЧЕНЫ" if questionable_reminders_enabled else "ВЫКЛЮЧЕНЫ") +
         "\nИспользование: /qreminders on|off"
+    )
+
+@dp.message_handler(commands=["duels"])
+async def cmd_duels(message: types.Message) -> None:
+    """Admin-only: включить/выключить дуэли.
+    Usage: /duels on|off (без аргумента — показать статус)
+    """
+    if not is_admin(message.from_user.id):
+        return await message.reply("❌ Нет прав.")
+    arg = (message.get_args() or "").strip().lower()
+    if arg in ("on", "вкл", "enable", "+"):
+        set_duels_enabled(True)
+        return await message.reply("✅ Дуэли — ВКЛЮЧЕНЫ.")
+    if arg in ("off", "выкл", "disable", "-"):
+        set_duels_enabled(False)
+        return await message.reply("✅ Дуэли — ВЫКЛЮЧЕНЫ.")
+    await message.reply(
+        "Статус: " + ("ВКЛЮЧЕНЫ" if get_duels_enabled() else "ВЫКЛЮЧЕНЫ") +
+        "\nИспользование: /duels on|off"
     )
 
 # mini-game commands removed
