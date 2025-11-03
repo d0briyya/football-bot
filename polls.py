@@ -17,7 +17,28 @@ def format_poll_votes(data: Dict[str, Any]) -> str:
 	votes = data.get("votes", {})
 	if not votes:
 		return "— Никто ещё не голосовал."
-	return "\n".join(f"{v.get('name')} — {v.get('answer')}" for v in votes.values())
+	# Печатаем единым форматом с иконками статуса: Да/Нет/Под вопросом
+	yes_list = []
+	no_list = []
+	maybe_list = []
+	for v in votes.values():
+		name = v.get("name")
+		answer = str(v.get("answer", ""))
+		low = answer.lower()
+		if answer.startswith("Да"):
+			yes_list.append(f"✅ {name}")
+		elif answer.startswith("Нет"):
+			# используем грустный смайлик для наглядности
+			no_list.append(f"😞 {name}")
+		elif "вопрос" in low or "?" in answer:
+			maybe_list.append(f"❔ {name}")
+		else:
+			# по умолчанию без иконки
+			maybe_list.append(f"❔ {name}")
+	lines = []
+	for lst in (yes_list, maybe_list, no_list):
+		lines.extend(lst)
+	return "\n".join(lines)
 
 
 

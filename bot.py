@@ -46,6 +46,7 @@ from tg_utils import safe_telegram_call
 from scheduler_setup import setup_scheduler_jobs
 from handlers_setup import setup_error_handler
 from polls import find_last_active_poll, format_poll_votes
+from duels import setup_duel_handlers, is_user_in_timeout
 
  
 
@@ -166,6 +167,7 @@ START_TIME = datetime.now()
 active_polls: Dict[str, Dict[str, Any]] = {}
 stats: Dict[str, int] = {}
 disabled_days: set = set()
+questionable_reminders_enabled: bool = True
 
 # -------------------- Mini-game removed --------------------
 
@@ -212,7 +214,7 @@ async def save_data() -> None:
         return
     _next_save_allowed = time.time() + 10
     try:
-        await _persist_save(DATA_FILE, active_polls, stats, disabled_days)
+        await _persist_save(DATA_FILE, active_polls, stats, disabled_days, questionable_reminders_enabled)
         log.debug("Data saved to %s", DATA_FILE)
     except Exception:
         log.exception("Failed to save data")
@@ -221,10 +223,12 @@ async def load_data() -> None:
     global active_polls, stats
     if os.path.exists(DATA_FILE):
         try:
-            ap, st, dd = await _persist_load(DATA_FILE)
+            ap, st, dd, qrem = await _persist_load(DATA_FILE)
             active_polls = ap
             stats = st
             disabled_days.clear(); disabled_days.update(dd)
+            global questionable_reminders_enabled
+            questionable_reminders_enabled = bool(qrem)
             log.info("Loaded data: active_polls=%s, stats=%s, disabled_days=%s", len(active_polls), len(stats), sorted(list(disabled_days)))
         except Exception:
             log.exception("Failed to load data — starting with empty state")
@@ -269,6 +273,8 @@ async def tag_questionable_users(poll_id: str) -> None:
     Use saved user_id to create mention via tg://user?id=...
     """
     try:
+        if not questionable_reminders_enabled:
+            return
         data = active_polls.get(poll_id)
         if not data or not data.get("active"):
             return
@@ -482,8 +488,7 @@ async def start_poll(poll: Dict[str, Any], from_admin: bool = False) -> None:
         }
         await save_data()
         if weather:
-            weather_msg = pick_weather_message(weather)
-            await safe_telegram_call(bot.send_message, CHAT_ID, f"<b>Погода на время игры:</b> {weather}\n\n{weather_msg}", parse_mode=ParseMode.HTML)
+            await safe_telegram_call(bot.send_message, CHAT_ID, f"<b>Погода на время игры:</b> {weather}", parse_mode=ParseMode.HTML)
         await safe_telegram_call(bot.send_message, CHAT_ID, "📢 <b>Новый опрос!</b>\nПроголосуйте 👇", parse_mode=ParseMode.HTML)
         if from_admin:
             await safe_telegram_call(bot.send_message, ADMIN_ID, f"✅ Опрос вручную: {poll['question']}")
@@ -538,7 +543,13 @@ async def send_summary(poll_id: str) -> None:
         else:
             game_dt = now
         weather = await _get_weather(game_dt)
-        weather_str = f"\n\n<b>Погода на момент игры:</b> {weather}" if weather else ""
+        weather_str = ""
+        if weather:
+            weather_str = f"\n\n<b>Погода на момент игры:</b> {weather}"
+            # Мотивационное сообщение о погоде — только если >=10 "Да"
+            if len(yes_users) >= 10:
+                weather_msg = pick_weather_message(weather)
+                weather_str += f"\n\n{weather_msg}"
         # ДОБАВЛЯЕМ блочок капитанов — если Вторник/Четверг и Да >=10
         captains_text = ""
         if data["poll"].get("day") in ("tue", "thu") and len(yes_users) >= 10:
@@ -642,6 +653,7 @@ async def cmd_commands(message: types.Message) -> None:
         "/stats — статистика «Да ✅»",
         "/nextpoll — когда следующий опрос",
         "/uptime — время работы бота",
+        "/duel — вызвать соперника на дуэль",
         "/commands — справка",
     ]
     if isadm:
@@ -658,6 +670,10 @@ async def cmd_commands(message: types.Message) -> None:
             "/disablepoll &lt;день&gt; — отключить автоопрос (напр. вт/thu)",
             "/enablepoll &lt;день&gt; — включить автоопрос",
             "/pollsstatus — показать отключённые дни",
+            "/remind [текст] — напомнить об опросе",
+            "/notify Текст — оповестить всех 'Да ✅'",
+            "/say Текст — отправить сообщение от имени бота",
+            "/qreminders on|off — вкл/выкл напоминания для 'Под вопросом'",
         ])
     await message.reply("\n".join(lines))
 
@@ -764,17 +780,31 @@ async def cmd_closepoll(message: types.Message) -> None:
 async def cmd_addplayer(message: types.Message) -> None:
     if not is_admin(message.from_user.id):
         return await message.reply("❌ Нет прав.")
-    name = message.get_args().strip()
-    if not name:
-        return await message.reply("Использование: /addplayer Имя")
+    raw = message.get_args()
+    if not raw or not raw.strip():
+        return await message.reply("Использование: /addplayer Имя1, Имя2; Имя3")
+    # Поддержка разделителей: запятая, точка с запятой, перевод строки, вертикальная черта
+    parts = []
+    for seg in raw.replace("\n", ",").replace(";", ",").replace("|", ",").split(","):
+        s = seg.strip()
+        if s:
+            parts.append(s)
+    if not parts:
+        return await message.reply("Не найдено имён для добавления.")
     last = find_last_active_poll(active_polls)
     if not last:
         return await message.reply("📭 Нет активных опросов.")
     pid, data = last
-    key = f"admin_{name}_{int(time.time())}"
-    data["votes"][key] = {"name": name, "answer": "Да ✅ (добавлен вручную)"}
+    added = 0
+    for name in parts:
+        key = f"admin_{name}_{int(time.time())}_{added}"
+        data["votes"][key] = {"name": name, "answer": "Да ✅ (добавлен вручную)"}
+        added += 1
     await save_data()
-    await message.reply(f"✅ Игрок '{name}' добавлен как 'Да ✅'.")
+    if added == 1:
+        await message.reply(f"✅ Игрок '{parts[0]}' добавлен как 'Да ✅'.")
+    else:
+        await message.reply(f"✅ Добавлено игроков: {added} — {', '.join(parts)}")
 
 @dp.message_handler(commands=["removeplayer"])
 async def cmd_removeplayer(message: types.Message) -> None:
@@ -882,6 +912,27 @@ async def cmd_notify(message: types.Message) -> None:
     await safe_telegram_call(bot.send_message, CHAT_ID, msg, parse_mode=ParseMode.HTML)
     await message.reply("✅ Оповещение отправлено")
 
+@dp.message_handler(commands=["remind"])
+async def cmd_remind(message: types.Message) -> None:
+    """Admin-only: отправить ручное напоминание об активном опросе.
+    Usage: /remind [опциональный текст]
+    """
+    if not is_admin(message.from_user.id):
+        return await message.reply("❌ Нет прав.")
+    last = find_last_active_poll(active_polls)
+    if not last:
+        return await message.reply("📭 Нет активных опросов.")
+    _, data = last
+    poll = data["poll"]
+    custom_text = (message.get_args() or "").strip()
+    question = poll.get("question", "Проголосуйте, пожалуйста!")
+    reminder_text = f"🔔 <b>Напоминание об опросе:</b>\n\n<b>{html.escape(question)}</b>"
+    if custom_text:
+        reminder_text += f"\n\n{custom_text}"
+    reminder_text += "\n\nПожалуйста, проголосуйте 👇"
+    await safe_telegram_call(bot.send_message, CHAT_ID, reminder_text, parse_mode=ParseMode.HTML)
+    await message.reply("✅ Напоминание отправлено")
+
 @dp.message_handler(commands=["backup"])
 async def cmd_backup(message: types.Message) -> None:
     if not is_admin(message.from_user.id):
@@ -892,10 +943,47 @@ async def cmd_backup(message: types.Message) -> None:
     else:
         await message.reply("⚠️ Данных для бэкапа нет.")
 
+@dp.message_handler(commands=["say"])
+async def cmd_say(message: types.Message) -> None:
+    """Admin-only: отправить любое сообщение от имени бота в чат."""
+    if not is_admin(message.from_user.id):
+        return await message.reply("❌ Нет прав.")
+    text = (message.get_args() or "").strip()
+    if not text:
+        return await message.reply("Использование: /say Текст сообщения")
+    await safe_telegram_call(bot.send_message, CHAT_ID, text, parse_mode=ParseMode.HTML)
+    await message.reply("✅ Сообщение отправлено")
+
+# -------------------- Admin: toggle 'Под вопросом' reminders --------------------
+@dp.message_handler(commands=["qreminders"])
+async def cmd_qreminders(message: types.Message) -> None:
+    """Admin-only: включить/выключить напоминания для 'Под вопросом'.
+    Usage: /qreminders on|off (без аргумента — показать статус)
+    """
+    if not is_admin(message.from_user.id):
+        return await message.reply("❌ Нет прав.")
+    arg = (message.get_args() or "").strip().lower()
+    global questionable_reminders_enabled
+    if arg in ("on", "вкл", "enable", "+"):
+        questionable_reminders_enabled = True
+        await save_data()
+        return await message.reply("✅ Напоминания для 'Под вопросом' — ВКЛЮЧЕНЫ.")
+    if arg in ("off", "выкл", "disable", "-"):
+        questionable_reminders_enabled = False
+        await save_data()
+        return await message.reply("✅ Напоминания для 'Под вопросом' — ВЫКЛЮЧЕНЫ.")
+    await message.reply(
+        "Статус: " + ("ВКЛЮЧЕНЫ" if questionable_reminders_enabled else "ВЫКЛЮЧЕНЫ") +
+        "\nИспользование: /qreminders on|off"
+    )
+
 # mini-game commands removed
 
 # -------------------- Mini-game removed --------------------
 # mini-game handlers removed
+
+# -------------------- Duel system --------------------
+# Регистрация хендлеров дуэлей происходит в main() через setup_duel_handlers
 
 # -------------------- Scheduler helpers --------------------
 def compute_next_poll_datetime() -> Optional[Tuple[datetime, Dict[str, Any]]]:
@@ -1031,7 +1119,10 @@ async def main() -> None:
     await safe_telegram_call(bot.send_message, ADMIN_ID, "✅ Бот запущен и готов к работе!")
     if not OPENWEATHER_API_KEY:
         await safe_telegram_call(bot.send_message, ADMIN_ID, "⚠️ Внимание: отсутствует OPENWEATHER_API_KEY. Прогноз погоды показываться не будет.")
-
+    
+    # setup duel handlers
+    setup_duel_handlers(dp, bot, scheduler, safe_telegram_call)
+    
     # add signal handlers
     loop = asyncio.get_event_loop()
     _install_signal_handlers(loop)
