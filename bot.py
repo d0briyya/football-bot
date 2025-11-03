@@ -799,7 +799,7 @@ async def cmd_addplayer(message: types.Message) -> None:
     added = 0
     for name in parts:
         key = f"admin_{name}_{int(time.time())}_{added}"
-    data["votes"][key] = {"name": name, "answer": "Да ✅ (добавлен вручную)"}
+        data["votes"][key] = {"name": name, "answer": "Да ✅ (добавлен вручную)"}
         added += 1
     await save_data()
     if added == 1:
