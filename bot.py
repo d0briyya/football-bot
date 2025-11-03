@@ -46,7 +46,7 @@ from tg_utils import safe_telegram_call
 from scheduler_setup import setup_scheduler_jobs
 from handlers_setup import setup_error_handler
 from polls import find_last_active_poll, format_poll_votes
-from duels import setup_duel_handlers, is_user_in_timeout
+from duels import setup_duel_handlers, is_user_in_timeout, remove_timeout, username_to_userid
 
  
 
@@ -674,6 +674,7 @@ async def cmd_commands(message: types.Message) -> None:
             "/notify Текст — оповестить всех 'Да ✅'",
             "/say Текст — отправить сообщение от имени бота",
             "/qreminders on|off — вкл/выкл напоминания для 'Под вопросом'",
+            "/unmute — размутить пользователя (ответьте на его сообщение)",
         ])
     await message.reply("\n".join(lines))
 
@@ -798,7 +799,7 @@ async def cmd_addplayer(message: types.Message) -> None:
     added = 0
     for name in parts:
         key = f"admin_{name}_{int(time.time())}_{added}"
-        data["votes"][key] = {"name": name, "answer": "Да ✅ (добавлен вручную)"}
+    data["votes"][key] = {"name": name, "answer": "Да ✅ (добавлен вручную)"}
         added += 1
     await save_data()
     if added == 1:
@@ -953,6 +954,27 @@ async def cmd_say(message: types.Message) -> None:
         return await message.reply("Использование: /say Текст сообщения")
     await safe_telegram_call(bot.send_message, CHAT_ID, text, parse_mode=ParseMode.HTML)
     await message.reply("✅ Сообщение отправлено")
+
+# -------------------- Admin: unmute (remove timeout) --------------------
+@dp.message_handler(commands=["unmute"])
+async def cmd_unmute(message: types.Message) -> None:
+    # Разрешено только главному админу и только в ЛС с ботом
+    if not is_admin(message.from_user.id):
+        return await message.reply("❌ Нет прав.")
+    if message.chat.type != "private":
+        return await message.reply("Эту команду нужно отправлять в ЛС боту.")
+    arg = (message.get_args() or "").strip()
+    if not arg or not arg.startswith("@"):
+        return await message.reply("Использование: /unmute @username")
+    uname = arg.lstrip("@").lower()
+    target_user_id = username_to_userid.get(uname)
+    if not target_user_id:
+        return await message.reply("Не удалось найти пользователя по username. Сначала пользователь должен участвовать в дуэли.")
+    try:
+        await remove_timeout(target_user_id)
+        await message.reply("✅ Пользователь размучен.")
+    except Exception:
+        await message.reply("⚠️ Не удалось размутить пользователя.")
 
 # -------------------- Admin: toggle 'Под вопросом' reminders --------------------
 @dp.message_handler(commands=["qreminders"])

@@ -13,6 +13,7 @@ from state import KALININGRAD_TZ
 # Глобальное состояние дуэлей (инициализируется из bot.py)
 active_duel: Optional[Dict[str, Any]] = None
 duel_timeouts: Dict[str, float] = {}  # user_id -> timestamp окончания таймаута
+username_to_userid: Dict[str, int] = {}  # username (lower, без @) -> user_id
 revanch_pending: Optional[Dict[str, Any]] = None  # Ожидающее предложение реванша
 revange_used: Dict[str, bool] = {}  # user_id -> использовал ли этот пользователь право на реванш (одноразовое)
 
@@ -99,6 +100,19 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
             opponent = None
             if message.reply_to_message and message.reply_to_message.from_user:
                 opponent = message.reply_to_message.from_user
+
+            # Обновляем карту username -> user_id
+            try:
+                if getattr(challenger, 'username', None):
+                    username_to_userid[str(challenger.username).lower()] = int(challenger.id)
+            except Exception:
+                pass
+            if opponent:
+                try:
+                    if getattr(opponent, 'username', None):
+                        username_to_userid[str(opponent.username).lower()] = int(opponent.id)
+                except Exception:
+                    pass
             
             if not opponent:
                 return await message.reply(
@@ -118,8 +132,10 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
             active_duel = {
                 "challenger_id": challenger.id,
                 "challenger_name": challenger.full_name or challenger.first_name,
+                "challenger_username": getattr(challenger, 'username', None),
                 "opponent_id": opponent.id,
                 "opponent_name": opponent.full_name or opponent.first_name,
+                "opponent_username": getattr(opponent, 'username', None),
                 "chat_id": message.chat.id,
                 "status": "pending",
                 "created_ts": _now_ts(),
@@ -173,13 +189,16 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
             except Exception:
                 pass
             
-            # Объявляем начало боя
-            await bot.send_message(
-                active_duel["chat_id"],
-                f"🗡️ Дуэль между {_mention(active_duel['challenger_id'], active_duel['challenger_name'])} "
-                f"и {_mention(active_duel['opponent_id'], active_duel['opponent_name'])} начинается!",
-                parse_mode=ParseMode.HTML,
-            )
+            # Компактно объявляем старт дуэли в беседе
+            try:
+                await bot.send_message(
+                    active_duel["chat_id"],
+                    f"🗡️ Дуэль: {_mention(active_duel['challenger_id'], active_duel['challenger_name'])} vs "
+                    f"{_mention(active_duel['opponent_id'], active_duel['opponent_name'])} — старт!",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
             
             # Пауза для драматизма
             await asyncio.sleep(2)
@@ -202,19 +221,11 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
             loser_uid_str = str(loser_id)
             has_revanch_right = not revange_used.get(loser_uid_str, False)
             
-            # Объявление результата с кнопкой реванша
-            kb_revanch = types.InlineKeyboardMarkup()
-            if has_revanch_right:
-                kb_revanch.add(types.InlineKeyboardButton(
-                    text="⚔️ Реванш!",
-                    callback_data=f"revanch_request:{loser_id}:{winner_id}"
-                ))
-            
+            # Объявление результата — в общем чате (видят все)
             await bot.send_message(
                 active_duel["chat_id"],
                 f"🎯 <b>Победитель:</b> {_mention(winner_id, winner_name)}\n\n"
                 f"😵 Проигравший {_mention(loser_id, loser_name)} получает таймаут на 30 минут!",
-                reply_markup=kb_revanch if kb_revanch.inline_keyboard else None,
                 parse_mode=ParseMode.HTML,
             )
             
@@ -226,6 +237,25 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                 active_duel["loser_id"] = loser_id
                 active_duel["loser_name"] = loser_name
                 active_duel["finished"] = True
+                # Отправляем проигравшему ЛС с предложением реванша
+                kb_revanch = types.InlineKeyboardMarkup()
+                kb_revanch.add(types.InlineKeyboardButton(
+                    text="⚔️ Реванш!",
+                    callback_data=f"revanch_request:{loser_id}:{winner_id}"
+                ))
+                try:
+                    await bot.send_message(
+                        loser_id,
+                        (
+                            "Ты проиграл дуэль. Можешь запросить <b>один</b> реванш.\n\n"
+                            "Если выиграешь — твой штраф в 30 минут <b>снимется</b>, соперник получит <b>1 час</b>.\n"
+                            "Если проиграешь — получишь <b>2 часа</b>, право на реванш пропадёт."
+                        ),
+                        reply_markup=kb_revanch,
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
             else:
                 # Сброс активной дуэли
                 active_duel = None
@@ -292,9 +322,10 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
             if revange_used.get(str(loser_id), False):
                 return await call.answer("Ты уже использовал право на реванш!", show_alert=True)
             
-            # Проверяем таймауты
-            if is_user_in_timeout(loser_id) or is_user_in_timeout(winner_id):
-                return await call.answer("Кто-то из игроков в таймауте", show_alert=True)
+            # Проверяем таймауты: проигравший может быть в таймауте и всё равно запросить реванш;
+            # соперник не должен быть в таймауте
+            if is_user_in_timeout(winner_id):
+                return await call.answer("Соперник сейчас в таймауте", show_alert=True)
             
             await call.answer()
             
@@ -340,12 +371,11 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
             except Exception:
                 pass
             
-            await bot.send_message(
-                call.message.chat.id,
-                rules_text,
-                reply_markup=kb,
-                parse_mode=ParseMode.HTML,
-            )
+            # Публикуем правила реванша в беседе
+            try:
+                await bot.send_message(call.message.chat.id, rules_text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
             
         except Exception:
             import logging
@@ -406,13 +436,16 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
             # Помечаем, что право на реванш использовано
             revange_used[str(revanch_pending["loser_id"])] = True
             
-            # Объявляем начало реванша
-            await bot.send_message(
-                revanch_pending["chat_id"],
-                f"⚔️ Реванш между {_mention(revanch_pending['loser_id'], revanch_pending['loser_name'])} "
-                f"и {_mention(revanch_pending['winner_id'], revanch_pending['winner_name'])} начинается!",
-                parse_mode=ParseMode.HTML,
-            )
+            # Компактно объявляем старт реванша в беседе
+            try:
+                await bot.send_message(
+                    active_duel["chat_id"],
+                    f"🗡️ Реванш: {_mention(active_duel['challenger_id'], active_duel['challenger_name'])} vs "
+                    f"{_mention(active_duel['opponent_id'], active_duel['opponent_name'])} — старт!",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
             
             # Пауза для драматизма
             await asyncio.sleep(2)
