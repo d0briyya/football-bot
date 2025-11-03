@@ -653,7 +653,7 @@ async def cmd_commands(message: types.Message) -> None:
         "/stats — статистика «Да ✅»",
         "/nextpoll — когда следующий опрос",
         "/uptime — время работы бота",
-        "/duel — вызвать соперника на дуэль",
+        "/duel — вызвать соперника на дуэль (ответьте на сообщение и напишите /duel)",
         "/commands — справка",
     ]
     if isadm:
