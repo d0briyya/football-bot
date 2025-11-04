@@ -489,7 +489,7 @@ async def start_poll(poll: Dict[str, Any], from_admin: bool = False) -> None:
         await save_data()
         if weather:
             await safe_telegram_call(bot.send_message, CHAT_ID, f"<b>Погода на время игры:</b> {weather}", parse_mode=ParseMode.HTML)
-        await safe_telegram_call(bot.send_message, CHAT_ID, "📢 <b>Новый опрос!</b>\nПроголосуйте 👇", parse_mode=ParseMode.HTML)
+        await safe_telegram_call(bot.send_message, CHAT_ID, "📢 <b>❗️Новый опрос❗</b>\nПроголосуйте ☝️", parse_mode=ParseMode.HTML)
         if from_admin:
             await safe_telegram_call(bot.send_message, ADMIN_ID, f"✅ Опрос вручную: {poll['question']}")
         log.info("Poll created: %s", poll.get("question"))
