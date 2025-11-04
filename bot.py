@@ -179,7 +179,7 @@ def _now_ts() -> float:
 
 # polls config (modifiable)
 polls_config = [
-    {"day": "tue", "time_poll": "10:15", "time_game": "20:00",
+    {"day": "tue", "time_poll": "09:00", "time_game": "20:00",
      "question": "Сегодня собираемся на песчанке в 20:00?",
      "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
     {"day": "thu", "time_poll": "09:00", "time_game": "20:00",
@@ -333,7 +333,7 @@ def schedule_poll_reminders(poll_id: str) -> None:
         if scheduler is None:
             log.error("Scheduler not initialized!")
             return
-        loop = bot.loop
+        loop = MAIN_LOOP
         start_dt = now_tz()
         # Вычислим close_dt: при наличии manual_close_* используем их, иначе общую логику
         mclose_day = poll.get("manual_close_day")
@@ -489,7 +489,7 @@ async def start_poll(poll: Dict[str, Any], from_admin: bool = False) -> None:
         await save_data()
         if weather:
             await safe_telegram_call(bot.send_message, CHAT_ID, f"<b>Погода на время игры:</b> {weather}", parse_mode=ParseMode.HTML)
-        await safe_telegram_call(bot.send_message, CHAT_ID, "📢 <b>Новый опрос!</b>\nПроголосуйте 👇", parse_mode=ParseMode.HTML)
+        await safe_telegram_call(bot.send_message, CHAT_ID, "📢 <b>Новый опрос!</b>\nПроголосуйте ☝️", parse_mode=ParseMode.HTML)
         if from_admin:
             await safe_telegram_call(bot.send_message, ADMIN_ID, f"✅ Опрос вручную: {poll['question']}")
         log.info("Poll created: %s", poll.get("question"))
