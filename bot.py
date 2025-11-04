@@ -179,10 +179,10 @@ def _now_ts() -> float:
 
 # polls config (modifiable)
 polls_config = [
-    {"day": "tue", "time_poll": "09:15", "time_game": "20:00",
+    {"day": "tue", "time_poll": "10:00", "time_game": "20:00",
      "question": "Сегодня собираемся на песчанке в 20:00?",
      "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
-    {"day": "thu", "time_poll": "09:15", "time_game": "20:00",
+    {"day": "thu", "time_poll": "10:00", "time_game": "20:00",
      "question": "Сегодня собираемся на песчанке в 20:00?",
      "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
     {"day": "fri", "time_poll": "21:00", "time_game": "12:00",
@@ -333,7 +333,7 @@ def schedule_poll_reminders(poll_id: str) -> None:
         if scheduler is None:
             log.error("Scheduler not initialized!")
             return
-        loop = asyncio.get_event_loop()
+        loop = bot.loop
         start_dt = now_tz()
         # Вычислим close_dt: при наличии manual_close_* используем их, иначе общую логику
         mclose_day = poll.get("manual_close_day")
@@ -489,7 +489,7 @@ async def start_poll(poll: Dict[str, Any], from_admin: bool = False) -> None:
         await save_data()
         if weather:
             await safe_telegram_call(bot.send_message, CHAT_ID, f"<b>Погода на время игры:</b> {weather}", parse_mode=ParseMode.HTML)
-        await safe_telegram_call(bot.send_message, CHAT_ID, "📢 <b>❗️Новый опрос❗</b>\nПроголосуйте ☝️", parse_mode=ParseMode.HTML)
+        await safe_telegram_call(bot.send_message, CHAT_ID, "📢 <b>Новый опрос!</b>\nПроголосуйте 👇", parse_mode=ParseMode.HTML)
         if from_admin:
             await safe_telegram_call(bot.send_message, ADMIN_ID, f"✅ Опрос вручную: {poll['question']}")
         log.info("Poll created: %s", poll.get("question"))
@@ -632,7 +632,7 @@ async def handle_poll_answer(poll_answer: types.PollAnswer) -> None:
                     # --- NEW: store user_id to enable direct mentions later ---
                     data["votes"][str(uid)] = {"name": uname, "answer": answer, "user_id": uid}
                 # save asynchronously (fire-and-forget)
-                asyncio.run_coroutine_threadsafe(save_data(), asyncio.get_event_loop())
+                asyncio.run_coroutine_threadsafe(save_data(), bot.loop)
                 log.debug("Vote saved: %s -> %s", uname, data["votes"].get(str(uid)))
                 return
     except Exception:
@@ -675,6 +675,7 @@ async def cmd_commands(message: types.Message) -> None:
             "/say Текст — отправить сообщение от имени бота",
             "/qreminders on|off — вкл/выкл напоминания для 'Под вопросом'",
             "/duels on|off — вкл/выкл дуэли",
+            "/mute — замутить пользователя (реплай или @username [мин])",
             "/unmute — размутить пользователя (ответьте на его сообщение)",
         ])
     await message.reply("\n".join(lines))
@@ -1035,21 +1036,21 @@ def compute_next_poll_datetime() -> Optional[Tuple[datetime, Dict[str, Any]]]:
 # Функции для APScheduler
 # ---
 def _schedule_poll_job(poll):
-    asyncio.run_coroutine_threadsafe(start_poll(poll), asyncio.get_event_loop())
+    asyncio.run_coroutine_threadsafe(start_poll(poll), bot.loop)
 
 def _schedule_summary_job(poll):
-    asyncio.run_coroutine_threadsafe(send_summary_by_day(poll), asyncio.get_event_loop())
+    asyncio.run_coroutine_threadsafe(send_summary_by_day(poll), bot.loop)
 
 def schedule_polls() -> None:
     if scheduler is None:
         log.error('Scheduler not initialized!')
         return
     def start_poll_cb(poll: dict):
-        asyncio.run_coroutine_threadsafe(start_poll(poll), asyncio.get_event_loop())
+        asyncio.run_coroutine_threadsafe(start_poll(poll), bot.loop)
     def send_summary_by_day_cb(poll: dict):
-        asyncio.run_coroutine_threadsafe(send_summary_by_day(poll), asyncio.get_event_loop())
+        asyncio.run_coroutine_threadsafe(send_summary_by_day(poll), bot.loop)
     def save_data_cb():
-        asyncio.run_coroutine_threadsafe(save_data(), asyncio.get_event_loop())
+        asyncio.run_coroutine_threadsafe(save_data(), bot.loop)
     setup_scheduler_jobs(
         scheduler,
         polls_config,

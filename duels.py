@@ -76,7 +76,7 @@ async def enforce_timeout(user_id: int, chat_id: int, name: str, scheduler, bot,
             timeout_job_id = f"timeout_{uid}_{int(_now_ts())}"
             scheduler.add_job(
                 lambda uid=user_id, chat_id=chat_id, name=name: asyncio.run_coroutine_threadsafe(
-                    async_remove_timeout_notify(uid, chat_id, name, bot), asyncio.get_event_loop()
+                    async_remove_timeout_notify(uid, chat_id, name, bot), bot.loop
                 ),
                 trigger='date',
                 run_date=datetime.fromtimestamp(timeout_end, tz=KALININGRAD_TZ),
@@ -256,7 +256,7 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                     active_duel["expire_job_id"] = expire_job_id
                     run_dt = datetime.fromtimestamp(active_duel["created_ts"] + DUEL_PENDING_MINUTES*60, tz=KALININGRAD_TZ)
                     scheduler.add_job(
-                        lambda: asyncio.run_coroutine_threadsafe(_expire_duel_if_pending(bot), asyncio.get_event_loop()),
+                        lambda: asyncio.run_coroutine_threadsafe(_expire_duel_if_pending(bot), bot.loop),
                         trigger='date',
                         run_date=run_dt,
                         id=expire_job_id,
@@ -368,7 +368,7 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                 try:
                     await bot.send_message(
                         active_duel["chat_id"],
-                        f"↩️ {_mention(loser_id, loser_name)}, можешь взять реванш.",
+                        f"↩️ {_mention(loser_id, loser_name)}, можешь взять реванш (один раз).",
                         reply_markup=kb_revanch,
                         parse_mode=ParseMode.HTML,
                     )
@@ -381,7 +381,7 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                     active_duel["rev_expire_job_id"] = rev_expire_job_id
                     run_dt = datetime.fromtimestamp(_now_ts() + REVANCH_DECISION_MINUTES*60, tz=KALININGRAD_TZ)
                     scheduler.add_job(
-                        lambda: asyncio.run_coroutine_threadsafe(_expire_revanch_if_pending(bot), asyncio.get_event_loop()),
+                        lambda: asyncio.run_coroutine_threadsafe(_expire_revanch_if_pending(bot), bot.loop),
                         trigger='date',
                         run_date=run_dt,
                         id=rev_expire_job_id,
@@ -526,7 +526,7 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                     revanch_pending["rev_decision_job_id"] = rev_decision_job_id
                     run_dt = datetime.fromtimestamp(_now_ts() + REVANCH_DECISION_MINUTES*60, tz=KALININGRAD_TZ)
                     scheduler.add_job(
-                        lambda: asyncio.run_coroutine_threadsafe(_expire_revanch_if_pending(bot), asyncio.get_event_loop()),
+                        lambda: asyncio.run_coroutine_threadsafe(_expire_revanch_if_pending(bot), bot.loop),
                         trigger='date',
                         run_date=run_dt,
                         id=rev_decision_job_id,
@@ -722,6 +722,62 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
             import logging
             logging.getLogger("bot").exception("Error in revanch_decline callback")
             revanch_pending = None
+    
+    @dp.message_handler(commands=["mute"])    
+    async def cmd_mute(message: types.Message) -> None:
+        """Админ-команда: /mute [minutes] по реплаю или /mute @username [minutes]."""
+        try:
+            if not _is_admin(message.from_user.id):
+                return
+            target_user: Optional[types.User] = None
+            minutes: int = 30
+            parts = (message.get_args() or "").split()
+            # Если есть реплай — это приоритетная цель
+            if message.reply_to_message and message.reply_to_message.from_user:
+                target_user = message.reply_to_message.from_user
+                # Попробуем извлечь число минут из аргументов
+                for p in parts:
+                    try:
+                        minutes = max(1, int(p))
+                        break
+                    except Exception:
+                        continue
+            else:
+                # Пытаемся распарсить @username и минуты из аргументов в любом порядке
+                username: Optional[str] = None
+                for p in parts:
+                    if p.startswith("@"):
+                        username = p[1:].lower()
+                    else:
+                        try:
+                            minutes = max(1, int(p))
+                        except Exception:
+                            pass
+                if username:
+                    uid = username_to_userid.get(username)
+                    if uid:
+                        # Построим фейкового пользователя с id (для упоминания возьмем текст из команды)
+                        class _U:
+                            id = uid
+                            full_name = username
+                            first_name = username
+                        target_user = _U()  # type: ignore
+            if not target_user:
+                return await message.reply(
+                    "Укажите пользователя: ответьте на его сообщение или /mute @username [минуты]",
+                )
+            await enforce_timeout(target_user.id, message.chat.id, getattr(target_user, 'full_name', str(target_user.id)), scheduler, bot, minutes)
+            await message.reply(
+                f"🔇 Пользователь {_mention(target_user.id, getattr(target_user, 'full_name', str(target_user.id)))} замьючен на {minutes} мин.",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            import logging
+            logging.getLogger("bot").exception("Error in /mute")
+            try:
+                await message.reply("Ошибка выполнения команды /mute")
+            except Exception:
+                pass
     
     @dp.message_handler(content_types=types.ContentType.ANY)
     async def handle_timeout_messages(message: types.Message) -> None:
