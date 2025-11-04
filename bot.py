@@ -179,10 +179,10 @@ def _now_ts() -> float:
 
 # polls config (modifiable)
 polls_config = [
-    {"day": "tue", "time_poll": "09:00", "time_game": "20:00",
+    {"day": "tue", "time_poll": "09:15", "time_game": "20:00",
      "question": "Сегодня собираемся на песчанке в 20:00?",
      "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
-    {"day": "thu", "time_poll": "09:00", "time_game": "20:00",
+    {"day": "thu", "time_poll": "09:15", "time_game": "20:00",
      "question": "Сегодня собираемся на песчанке в 20:00?",
      "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
     {"day": "fri", "time_poll": "21:00", "time_game": "12:00",
