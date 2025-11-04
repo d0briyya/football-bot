@@ -368,7 +368,7 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                 try:
                     await bot.send_message(
                         active_duel["chat_id"],
-                        f"↩️ {_mention(loser_id, loser_name)}, можешь взять реванш (один раз).",
+                        f"↩️ {_mention(loser_id, loser_name)}, можешь взять реванш.",
                         reply_markup=kb_revanch,
                         parse_mode=ParseMode.HTML,
                     )
