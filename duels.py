@@ -74,9 +74,10 @@ async def enforce_timeout(user_id: int, chat_id: int, name: str, scheduler, bot,
     if scheduler:
         try:
             timeout_job_id = f"timeout_{uid}_{int(_now_ts())}"
+            loop = getattr(scheduler, "_eventloop", None)
             scheduler.add_job(
                 lambda uid=user_id, chat_id=chat_id, name=name: asyncio.run_coroutine_threadsafe(
-                    async_remove_timeout_notify(uid, chat_id, name, bot), bot.loop
+                    async_remove_timeout_notify(uid, chat_id, name, bot), loop or asyncio.get_event_loop()
                 ),
                 trigger='date',
                 run_date=datetime.fromtimestamp(timeout_end, tz=KALININGRAD_TZ),
@@ -255,8 +256,9 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                     expire_job_id = f"duel_expire_{int(active_duel['created_ts'])}"
                     active_duel["expire_job_id"] = expire_job_id
                     run_dt = datetime.fromtimestamp(active_duel["created_ts"] + DUEL_PENDING_MINUTES*60, tz=KALININGRAD_TZ)
+                    loop = getattr(scheduler, "_eventloop", None)
                     scheduler.add_job(
-                        lambda: asyncio.run_coroutine_threadsafe(_expire_duel_if_pending(bot), bot.loop),
+                        lambda: asyncio.run_coroutine_threadsafe(_expire_duel_if_pending(bot), loop or asyncio.get_event_loop()),
                         trigger='date',
                         run_date=run_dt,
                         id=expire_job_id,
@@ -380,8 +382,9 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                     rev_expire_job_id = f"rev_expire_{int(_now_ts())}"
                     active_duel["rev_expire_job_id"] = rev_expire_job_id
                     run_dt = datetime.fromtimestamp(_now_ts() + REVANCH_DECISION_MINUTES*60, tz=KALININGRAD_TZ)
+                    loop = getattr(scheduler, "_eventloop", None)
                     scheduler.add_job(
-                        lambda: asyncio.run_coroutine_threadsafe(_expire_revanch_if_pending(bot), bot.loop),
+                        lambda: asyncio.run_coroutine_threadsafe(_expire_revanch_if_pending(bot), loop or asyncio.get_event_loop()),
                         trigger='date',
                         run_date=run_dt,
                         id=rev_expire_job_id,
@@ -525,8 +528,9 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                     # сохраним, чтобы отменить при accept/decline
                     revanch_pending["rev_decision_job_id"] = rev_decision_job_id
                     run_dt = datetime.fromtimestamp(_now_ts() + REVANCH_DECISION_MINUTES*60, tz=KALININGRAD_TZ)
+                    loop = getattr(scheduler, "_eventloop", None)
                     scheduler.add_job(
-                        lambda: asyncio.run_coroutine_threadsafe(_expire_revanch_if_pending(bot), bot.loop),
+                        lambda: asyncio.run_coroutine_threadsafe(_expire_revanch_if_pending(bot), loop or asyncio.get_event_loop()),
                         trigger='date',
                         run_date=run_dt,
                         id=rev_decision_job_id,

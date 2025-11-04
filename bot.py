@@ -179,10 +179,10 @@ def _now_ts() -> float:
 
 # polls config (modifiable)
 polls_config = [
-    {"day": "tue", "time_poll": "10:00", "time_game": "20:00",
+    {"day": "tue", "time_poll": "10:15", "time_game": "20:00",
      "question": "Сегодня собираемся на песчанке в 20:00?",
      "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
-    {"day": "thu", "time_poll": "10:00", "time_game": "20:00",
+    {"day": "thu", "time_poll": "09:00", "time_game": "20:00",
      "question": "Сегодня собираемся на песчанке в 20:00?",
      "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
     {"day": "fri", "time_poll": "21:00", "time_game": "12:00",
@@ -1036,21 +1036,21 @@ def compute_next_poll_datetime() -> Optional[Tuple[datetime, Dict[str, Any]]]:
 # Функции для APScheduler
 # ---
 def _schedule_poll_job(poll):
-    asyncio.run_coroutine_threadsafe(start_poll(poll), bot.loop)
+    asyncio.run_coroutine_threadsafe(start_poll(poll), MAIN_LOOP)
 
 def _schedule_summary_job(poll):
-    asyncio.run_coroutine_threadsafe(send_summary_by_day(poll), bot.loop)
+    asyncio.run_coroutine_threadsafe(send_summary_by_day(poll), MAIN_LOOP)
 
 def schedule_polls() -> None:
     if scheduler is None:
         log.error('Scheduler not initialized!')
         return
     def start_poll_cb(poll: dict):
-        asyncio.run_coroutine_threadsafe(start_poll(poll), bot.loop)
+        asyncio.run_coroutine_threadsafe(start_poll(poll), MAIN_LOOP)
     def send_summary_by_day_cb(poll: dict):
-        asyncio.run_coroutine_threadsafe(send_summary_by_day(poll), bot.loop)
+        asyncio.run_coroutine_threadsafe(send_summary_by_day(poll), MAIN_LOOP)
     def save_data_cb():
-        asyncio.run_coroutine_threadsafe(save_data(), bot.loop)
+        asyncio.run_coroutine_threadsafe(save_data(), MAIN_LOOP)
     setup_scheduler_jobs(
         scheduler,
         polls_config,
