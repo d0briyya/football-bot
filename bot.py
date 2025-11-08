@@ -159,6 +159,7 @@ dp = Dispatcher(bot)
 
 # Планировщик создадим внутри main(), чтобы он корректно работал в том же event loop, что и aiogram
 scheduler: Optional[AsyncIOScheduler] = None
+MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 
 START_TIME = datetime.now()
@@ -1103,11 +1104,21 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
 # -------------------- Main --------------------
 async def main() -> None:
     log.info("Starting bot...")
+    global scheduler, MAIN_LOOP
+    try:
+        # Получаем текущий активный event loop
+        MAIN_LOOP = asyncio.get_running_loop()
+        log.info("Event loop obtained: %s", MAIN_LOOP)
+    except RuntimeError:
+        MAIN_LOOP = asyncio.get_event_loop()
+        log.info("Event loop created: %s", MAIN_LOOP)
+    
+    scheduler = AsyncIOScheduler(timezone=KALININGRAD_TZ)
+    log.info("Scheduler created")
+    
     await load_data()
-    global scheduler
-    global MAIN_LOOP
-    MAIN_LOOP = asyncio.get_event_loop()
-    scheduler = AsyncIOScheduler(timezone=KALININGRAD_TZ, event_loop=MAIN_LOOP)
+    log.info("Data loaded")
+    
     # Восстановление напоминаний
     for pid, data in list(active_polls.items()):
         try:
@@ -1117,34 +1128,15 @@ async def main() -> None:
             log.exception("Failed to restore reminders for poll %s", pid)
 
     # ensure polling mode
+    log.info("Deleting webhook...")
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-    except Exception:
-        pass
+        log.info("Webhook deleted successfully")
+    except Exception as e:
+        log.exception("Failed to delete webhook: %s", e)
 
-    # schedule jobs and keepalive + scheduler
-    await start_keepalive_server()
-
-    # === ИНИЦИАЛИЗАЦИЯ ПЛАНИРОВЩИКА (Scheduler) ===
-    try:
-        # Получаем текущий активный event loop (тот же, что использует aiogram)
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.get_event_loop()
-
-    # Планируем опросы и запускаем планировщик
-    schedule_polls()
-    try:
-        scheduler.start()
-    except Exception:
-        log.exception("Failed to start scheduler")
-
-    # notify admin once on startup
-    await safe_telegram_call(bot.send_message, ADMIN_ID, "✅ Бот запущен и готов к работе!")
-    if not OPENWEATHER_API_KEY:
-        await safe_telegram_call(bot.send_message, ADMIN_ID, "⚠️ Внимание: отсутствует OPENWEATHER_API_KEY. Прогноз погоды показываться не будет.")
-    
-    # setup duel handlers
+    # setup handlers BEFORE starting scheduler
+    log.info("Setting up handlers...")
     def check_active_tue_thu_poll() -> bool:
         """Проверить, есть ли активный опрос для вторника или четверга."""
         try:
@@ -1158,15 +1150,85 @@ async def main() -> None:
             return False
     
     setup_duel_handlers(dp, bot, scheduler, safe_telegram_call, check_active_tue_thu_poll, MAIN_LOOP)
+    log.info("Duel handlers set up")
     
-    # add signal handlers
-    loop = asyncio.get_event_loop()
-    _install_signal_handlers(loop)
     # setup errors handler
     setup_error_handler(dp, bot, ADMIN_ID, log)
+    log.info("Error handler set up")
+    
+    # Проверка зарегистрированных handlers
+    try:
+        handlers_count = len(dp.message_handlers.handlers)
+        log.info("Total message handlers registered: %d", handlers_count)
+        for idx, handler in enumerate(dp.message_handlers.handlers):
+            log.debug("Handler %d: %s", idx, handler)
+    except Exception as e:
+        log.warning("Failed to check handlers: %s", e)
+    
+    # schedule jobs and keepalive + scheduler
+    log.info("Starting keepalive server...")
+    await start_keepalive_server()
 
-    log.info("Start polling...")
-    await dp.start_polling()
+    # Планируем опросы
+    log.info("Scheduling polls...")
+    schedule_polls()
+    
+    # Запускаем планировщик
+    log.info("Starting scheduler...")
+    try:
+        scheduler.start()
+        log.info("Scheduler started successfully")
+    except Exception as e:
+        log.exception("Failed to start scheduler: %s", e)
+        raise
+
+    # notify admin once on startup (неблокирующая отправка)
+    async def send_startup_message():
+        try:
+            await safe_telegram_call(bot.send_message, ADMIN_ID, "✅ Бот запущен и готов к работе!")
+            log.info("Startup message sent to admin")
+        except Exception as e:
+            log.exception("Failed to send startup message: %s", e)
+        if not OPENWEATHER_API_KEY:
+            try:
+                await safe_telegram_call(bot.send_message, ADMIN_ID, "⚠️ Внимание: отсутствует OPENWEATHER_API_KEY. Прогноз погоды показываться не будет.")
+            except Exception as e:
+                log.exception("Failed to send weather warning: %s", e)
+    
+    # Запускаем отправку в фоне, не блокируя основной поток
+    asyncio.create_task(send_startup_message())
+    log.info("Startup message task created")
+    
+    # add signal handlers
+    try:
+        _install_signal_handlers(MAIN_LOOP)
+        log.info("Signal handlers installed")
+    except Exception as e:
+        log.exception("Failed to install signal handlers: %s", e)
+
+    log.info("Starting polling...")
+    log.info("Bot token: %s...", TOKEN[:10] + "..." if TOKEN else "None")
+    log.info("Chat ID: %s", CHAT_ID)
+    log.info("Admin ID: %s", ADMIN_ID)
+    
+    # Проверка доступности бота
+    try:
+        bot_info = await bot.get_me()
+        log.info("Bot info: @%s (%s)", bot_info.username, bot_info.first_name)
+    except Exception as e:
+        log.exception("Failed to get bot info: %s", e)
+        raise
+    
+    try:
+        log.info("Calling dp.start_polling()...")
+        await dp.start_polling()
+        log.info("Polling stopped")
+    except KeyboardInterrupt:
+        log.info("Polling interrupted by user")
+        raise
+    except Exception as e:
+        log.exception("Polling failed: %s", e)
+        raise
 
 
 if __name__ == "__main__":

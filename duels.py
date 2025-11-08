@@ -793,8 +793,12 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
                 username_to_userid[str(message.from_user.username).lower()] = int(message.from_user.id)
         except Exception:
             pass
+        # Проверяем таймаут только для НЕ команд (команды обрабатываются другими handlers)
         if is_user_in_timeout(message.from_user.id):
-            # Блокируем любые сообщения и команды от пользователя в таймауте
+            # Пропускаем команды - они обрабатываются специальными handlers
+            if message.text and message.text.startswith('/'):
+                return
+            # Блокируем любые другие сообщения от пользователя в таймауте
             try:
                 await bot.delete_message(message.chat.id, message.message_id)
             except Exception:
