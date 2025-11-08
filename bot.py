@@ -675,8 +675,8 @@ async def cmd_commands(message: types.Message) -> None:
             "/say Текст — отправить сообщение от имени бота",
             "/qreminders on|off — вкл/выкл напоминания для 'Под вопросом'",
             "/duels on|off — вкл/выкл дуэли",
-            "/mute — замутить пользователя (реплай или @username [мин])",
-            "/unmute — размутить пользователя (ответьте на его сообщение)",
+            "/mute [минуты] — замутить пользователя (ответьте на сообщение, укажите минуты)",
+            "/unmute — размутить пользователя (ответьте на сообщение)",
         ])
     await message.reply("\n".join(lines))
 
@@ -957,28 +957,9 @@ async def cmd_say(message: types.Message) -> None:
     await safe_telegram_call(bot.send_message, CHAT_ID, text, parse_mode=ParseMode.HTML)
     await message.reply("✅ Сообщение отправлено")
 
-# -------------------- Admin: unmute (remove timeout) --------------------
-@dp.message_handler(commands=["unmute"])
-async def cmd_unmute(message: types.Message) -> None:
-    # Разрешено только главному админу и только в ЛС с ботом
-    if not is_admin(message.from_user.id):
-        return await message.reply("❌ Нет прав.")
-    if message.chat.type != "private":
-        return await message.reply("Эту команду нужно отправлять в ЛС боту.")
-    arg = (message.get_args() or "").strip()
-    if not arg or not arg.startswith("@"):
-        return await message.reply("Использование: /unmute @username")
-    uname = arg.lstrip("@").lower()
-    target_user_id = username_to_userid.get(uname)
-    if not target_user_id:
-        return await message.reply("Не удалось найти пользователя по username. Сначала пользователь должен участвовать в дуэли.")
-    try:
-        await remove_timeout(target_user_id)
-        await message.reply("✅ Пользователь размучен.")
-    except Exception:
-        await message.reply("⚠️ Не удалось размутить пользователя.")
-
 # -------------------- Admin: toggle 'Под вопросом' reminders --------------------
+# Примечание: команды /mute и /unmute теперь находятся в duels.py
+
 @dp.message_handler(commands=["qreminders"])
 async def cmd_qreminders(message: types.Message) -> None:
     """Admin-only: включить/выключить напоминания для 'Под вопросом'.
@@ -1176,7 +1157,7 @@ async def main() -> None:
         except Exception:
             return False
     
-    setup_duel_handlers(dp, bot, scheduler, safe_telegram_call, check_active_tue_thu_poll)
+    setup_duel_handlers(dp, bot, scheduler, safe_telegram_call, check_active_tue_thu_poll, MAIN_LOOP)
     
     # add signal handlers
     loop = asyncio.get_event_loop()
