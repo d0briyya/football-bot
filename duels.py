@@ -15,7 +15,7 @@ from state import KALININGRAD_TZ
 log = logging.getLogger("bot")
 
 # Configurable timeouts (minutes)
-DUEL_PENDING_MINUTES = int(os.getenv("DUEL_PENDING_MINUTES", "5"))
+DUEL_PENDING_MINUTES = int(os.getenv("DUEL_PENDING_MINUTES", "10"))
 DUEL_BETTING_MINUTES = 2  # Время на выбор стороны болельщиками
 DUEL_MAX_DURATION_MINUTES = 3  # Максимальная длительность дуэли
 
@@ -300,7 +300,7 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
         info = duel_daily_count.get(str(uid))
         if not info or info.get('date') != _date_key():
             return True
-        return int(info.get('count', 0)) < 10
+        return int(info.get('count', 0)) < 3
 
     def _inc_duel_count(u1: int, u2: int) -> None:
         for uid in (u1, u2):
@@ -318,7 +318,7 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
         try:
             if active_duel and active_duel.get("status") == "pending":
                 chat_id = active_duel.get("chat_id")
-                await bot.send_message(chat_id, "⌛ Вызов на дуэль просрочен (5 минут). Дуэль отменена.")
+                await bot.send_message(chat_id, "⌛ Вызов на дуэль просрочен (10 минут). Дуэль отменена.")
                 active_duel = None
         except Exception:
             log.exception("Failed to expire pending duel")
@@ -344,7 +344,7 @@ def setup_duel_handlers(dp: Dispatcher, bot: Bot, scheduler, safe_telegram_call_
             
             # Лимит на дуэли в сутки (кроме администратора)
             if not _can_start_duel(challenger.id):
-                return await message.reply("⛔ Лимит дуэлей на сегодня исчерпан (10 в сутки).")
+                return await message.reply("⛔ Лимит дуэлей на сегодня исчерпан (3 в сутки).")
 
             # Проверка таймаута вызывающего
             if is_user_in_timeout(challenger.id):

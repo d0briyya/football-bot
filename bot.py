@@ -46,7 +46,7 @@ from tg_utils import safe_telegram_call
 from scheduler_setup import setup_scheduler_jobs
 from handlers_setup import setup_error_handler
 from polls import find_last_active_poll, format_poll_votes
-from duels import setup_duel_handlers, is_user_in_timeout, remove_timeout, username_to_userid, set_duels_enabled, get_duels_enabled
+from duels import setup_duel_handlers, is_user_in_timeout, remove_timeout, username_to_userid, set_duels_enabled, get_duels_enabled, enforce_timeout
 
  
 
@@ -180,13 +180,13 @@ def _now_ts() -> float:
 
 # polls config (modifiable)
 polls_config = [
-    {"day": "tue", "time_poll": "08:00", "time_game": "20:00",
+    {"day": "tue", "time_poll": "09:00", "time_game": "20:00",
      "question": "Сегодня собираемся на песчанке в 20:00?",
      "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
-    {"day": "thu", "time_poll": "08:00", "time_game": "20:00",
+    {"day": "thu", "time_poll": "09:00", "time_game": "20:00",
      "question": "Сегодня собираемся на песчанке в 20:00?",
      "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
-    {"day": "fri", "time_poll": "17:00", "time_game": "12:00",
+    {"day": "fri", "time_poll": "21:00", "time_game": "12:00",
      "question": "Завтра в 12:00 собираемся на песчанке?",
      "options": ["Да ✅", "Нет ❌"]}
 ]
@@ -271,7 +271,8 @@ async def send_reminder_if_needed(poll_id: str) -> None:
 async def tag_questionable_users(poll_id: str) -> None:
     """
     Tag users who voted 'Под вопросом' (or containing 'Под вопросом' substring).
-    Use saved user_id to create mention via tg://user?id=...
+    Use saved user_id to create mention via tg://user?id=..., or use https://t.me/{username} if username is available,
+    otherwise use plain escaped name.
     """
     try:
         if not questionable_reminders_enabled:
@@ -303,9 +304,13 @@ async def tag_questionable_users(poll_id: str) -> None:
             if "под" in answer.lower() or "под вопрос" in answer.lower() or "?" in answer:
                 user_id = v.get("user_id")
                 name = v.get("name", "Участник")
+                username = v.get("username")
                 safe_name = html.escape(name)
                 if user_id:
                     questionable_mentions.append(f'<a href="tg://user?id={user_id}">{safe_name}</a>')
+                elif username:
+                    username_clean = str(username).lstrip("@")
+                    questionable_mentions.append(f'<a href="https://t.me/{html.escape(username_clean)}">{safe_name}</a>')
                 else:
                     questionable_mentions.append(safe_name)
         if questionable_mentions:
@@ -514,10 +519,20 @@ async def send_summary(poll_id: str) -> None:
     if not data:
         return
     try:
+        penalized_users = []  # список (user_id, name) для наказаний 'Под вопросом'
         data["active"] = False
         votes = data.get("votes", {})
         yes_users = [html.escape(v["name"]) for v in votes.values() if v["answer"].startswith("Да")]
         no_users = [html.escape(v["name"]) for v in votes.values() if v["answer"].startswith("Нет")]
+        # Соберём пользователей 'Под вопросом' для возможного наказания
+        maybe_users = []
+        for v in votes.values():
+            if str(v.get("answer", "")).lower().startswith("под вопрос"):
+                uid = v.get("user_id")
+                name = v.get("name", "Участник")
+                if uid:
+                    penalized_users.append((uid, name))
+                maybe_users.append(html.escape(name))
         if data["poll"].get("day") == "fri":
             status = (
                 "📊 Итог субботнего опроса:\n\n"
@@ -614,6 +629,25 @@ async def send_summary(poll_id: str) -> None:
         active_polls.pop(poll_id, None)
         await save_data()
         log.info("Summary sent for poll: %s", data["poll"].get("question"))
+
+        # Наказание за 'Под вопросом' — таймаут на 36 часов (2160 минут)
+        if penalized_users:
+            try:
+                for uid, name in penalized_users:
+                    try:
+                        await enforce_timeout(uid, CHAT_ID, name, scheduler, bot, timeout_minutes=2160)
+                    except Exception:
+                        log.exception("Failed to enforce timeout for maybe user %s", uid)
+                # Сообщение в чат о блокировке
+                mentions = [f'<a href="tg://user?id={uid}">{html.escape(name)}</a>' for uid, name in penalized_users]
+                block_text = (
+                    "⛔ <b>Временная блокировка</b>\n"
+                    "Следующие пользователи выбрали вариант 'Под вопросом ❔' до конца опроса и временно заблокированы на 36 часов:\n"
+                    + (", ".join(mentions) if mentions else "—")
+                )
+                await safe_telegram_call(bot.send_message, CHAT_ID, block_text, parse_mode=ParseMode.HTML)
+            except Exception:
+                log.exception("Failed to notify about maybe-users punishment")
     except Exception:
         log.exception("Failed to send summary for poll: %s", data["poll"].get("question"))
 
@@ -623,6 +657,12 @@ async def handle_poll_answer(poll_answer: types.PollAnswer) -> None:
     try:
         uid = poll_answer.user.id
         uname = poll_answer.user.full_name or poll_answer.user.first_name or str(uid)
+        # (Опционально) игнорировать ответы пользователей в таймауте
+        try:
+            if is_user_in_timeout(uid):
+                return
+        except Exception:
+            pass
         option_ids = poll_answer.option_ids
         for poll_id, data in list(active_polls.items()):
             if poll_answer.poll_id == poll_id:
@@ -630,10 +670,16 @@ async def handle_poll_answer(poll_answer: types.PollAnswer) -> None:
                     data["votes"].pop(str(uid), None)
                 else:
                     answer = data["poll"]["options"][option_ids[0]]
-                    # --- NEW: store user_id to enable direct mentions later ---
-                    data["votes"][str(uid)] = {"name": uname, "answer": answer, "user_id": uid}
+                    # --- Сохраняем user_id и username для корректных упоминаний позже ---
+                    username = getattr(poll_answer.user, "username", None)
+                    data["votes"][str(uid)] = {
+                        "name": uname,
+                        "answer": answer,
+                        "user_id": uid,
+                        "username": username,
+                    }
                 # save asynchronously (fire-and-forget)
-                asyncio.run_coroutine_threadsafe(save_data(), bot.loop)
+                asyncio.run_coroutine_threadsafe(save_data(), MAIN_LOOP)
                 log.debug("Vote saved: %s -> %s", uname, data["votes"].get(str(uid)))
                 return
     except Exception:
