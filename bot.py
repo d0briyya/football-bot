@@ -180,13 +180,13 @@ def _now_ts() -> float:
 
 # polls config (modifiable)
 polls_config = [
-    {"day": "tue", "time_poll": "09:00", "time_game": "20:00",
+    {"day": "tue", "time_poll": "08:00", "time_game": "21:00",
+     "question": "⚠️ ФОК 21:00 — сегодня тренировочное занятие! Кто готов и будет?",
+     "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
+    {"day": "thu", "time_poll": "08:00", "time_game": "20:00",
      "question": "Сегодня собираемся на песчанке в 20:00?",
      "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
-    {"day": "thu", "time_poll": "09:00", "time_game": "20:00",
-     "question": "Сегодня собираемся на песчанке в 20:00?",
-     "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
-    {"day": "fri", "time_poll": "21:00", "time_game": "12:00",
+    {"day": "fri", "time_poll": "16:00", "time_game": "12:00",
      "question": "Завтра в 12:00 собираемся на песчанке?",
      "options": ["Да ✅", "Нет ❌"]}
 ]
@@ -464,7 +464,7 @@ async def start_poll(poll: Dict[str, Any], from_admin: bool = False) -> None:
             game_dt = KALININGRAD_TZ.localize(game_dt_naive)
         else:
             game_dt = now
-        weather = await _get_weather(game_dt)
+        weather = await _get_weather(game_dt) if poll.get("day") != "tue" else None
         msg = await safe_telegram_call(
             bot.send_poll,
             chat_id=CHAT_ID,
@@ -496,6 +496,14 @@ async def start_poll(poll: Dict[str, Any], from_admin: bool = False) -> None:
         if weather:
             await safe_telegram_call(bot.send_message, CHAT_ID, f"<b>Погода на время игры:</b> {weather}", parse_mode=ParseMode.HTML)
         await safe_telegram_call(bot.send_message, CHAT_ID, "📢 <b>Новый опрос!</b>\nПроголосуйте ☝️", parse_mode=ParseMode.HTML)
+        if poll.get("day") == "tue":
+            await safe_telegram_call(
+                bot.send_message,
+                CHAT_ID,
+                "❗️<b>ФОК • СТАРТ РОВНО В 21:00</b>\n"
+                "Переобуйтесь в сменную обувь в холле <b>ФОКа</b>, а затем заходите в раздевалку.",
+                parse_mode=ParseMode.HTML,
+            )
         if from_admin:
             await safe_telegram_call(bot.send_message, ADMIN_ID, f"✅ Опрос вручную: {poll['question']}")
         log.info("Poll created: %s", poll.get("question"))
@@ -525,15 +533,14 @@ async def send_summary(poll_id: str) -> None:
         yes_users = [html.escape(v["name"]) for v in votes.values() if v["answer"].startswith("Да")]
         no_users = [html.escape(v["name"]) for v in votes.values() if v["answer"].startswith("Нет")]
         # Соберём пользователей 'Под вопросом' для возможного наказания
-        maybe_users = []
         for v in votes.values():
             if str(v.get("answer", "")).lower().startswith("под вопрос"):
                 uid = v.get("user_id")
                 name = v.get("name", "Участник")
                 if uid:
                     penalized_users.append((uid, name))
-                maybe_users.append(html.escape(name))
-        if data["poll"].get("day") == "fri":
+        day = data["poll"].get("day")
+        if day == "fri":
             status = (
                 "📊 Итог субботнего опроса:\n\n"
                 f"👥 Всего проголосовало: {len(votes)} человек(а).\n"
@@ -541,11 +548,25 @@ async def send_summary(poll_id: str) -> None:
             )
         else:
             total_yes = len(yes_users)
-            status = (
-                "⚠️ Сегодня не собираемся — меньше 10 участников."
-                if total_yes < 10 else
-                "✅ Сегодня собираемся на песчанке! ⚽"
-            )
+            if day == "tue":
+                if total_yes >= 10:
+                    status = (
+                        "✅ <b>Сегодня встречаемся в ФОКе в 21:00!</b>\n"
+                        "⚡️ Приходите вовремя — тренировка начнётся ровно в 21:00.\n"
+                        "‼️ <b>СМЕНКУ ПЕРЕОДЕВАЕМ В ФОКЕ ПЕРЕД ВХОДОМ В РАЗДЕВАЛКУ!</b>"
+                    )
+                else:
+                    status = (
+                        "⚠️ По голосам меньше 10, но всё равно собираемся в <b>ФОКе</b> в <b>21:00</b>!\n"
+                        "🙏 Надеемся, что ещё подтянутся ребята, чтобы побегать полноценно.\n"
+                        "‼️ <b>СМЕНКУ ПЕРЕОДЕВАЕМ В ФОКЕ ПЕРЕД ВХОДОМ В РАЗДЕВАЛКУ!</b>"
+                    )
+            else:
+                status = (
+                    "⚠️ Сегодня не собираемся — меньше 10 участников."
+                    if total_yes < 10 else
+                    "✅ Сегодня собираемся на песчанке! ⚽"
+                )
         day = data["poll"].get("day", "manual")
         now = now_tz()
         if day != "manual":
@@ -558,9 +579,10 @@ async def send_summary(poll_id: str) -> None:
             game_dt = KALININGRAD_TZ.localize(game_dt_naive)
         else:
             game_dt = now
-        weather = await _get_weather(game_dt)
+        include_weather = data["poll"].get("day") != "tue"
+        weather = await _get_weather(game_dt) if include_weather else None
         weather_str = ""
-        if weather:
+        if weather and include_weather:
             weather_str = f"\n\n<b>Погода на момент игры:</b> {weather}"
             # Мотивационное сообщение о погоде — только если >=10 "Да"
             if len(yes_users) >= 10:
