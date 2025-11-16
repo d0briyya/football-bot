@@ -590,7 +590,7 @@ async def send_summary(poll_id: str) -> None:
                 weather_str += f"\n\n{weather_msg}"
         # ДОБАВЛЯЕМ блочок капитанов — если Вторник/Четверг и Да >=10
         captains_text = ""
-        if data["poll"].get("day") in ("tue", "thu") and len(yes_users) >= 10:
+        if data["poll"].get("day") in ("thu") and len(yes_users) >= 10:
             captains = random.sample(yes_users, 2)
             captains_text = (
                 f"\n\n🏆 <b>КАПИТАНЫ ВЕЧЕРА:</b>\n"
