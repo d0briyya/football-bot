@@ -169,6 +169,7 @@ active_polls: Dict[str, Dict[str, Any]] = {}
 stats: Dict[str, int] = {}
 disabled_days: set = set()
 questionable_reminders_enabled: bool = True
+low_yes_reminders_enabled: bool = True
 
 # -------------------- Mini-game removed --------------------
 
@@ -180,15 +181,27 @@ def _now_ts() -> float:
 
 # polls config (modifiable)
 polls_config = [
-    {"day": "tue", "time_poll": "08:00", "time_game": "21:30",
-     "question": "⚠️ ФОК 21:30 — сегодня тренировочное занятие! Кто готов и будет?",
-     "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
-    {"day": "thu", "time_poll": "08:00", "time_game": "20:00",
-     "question": "Сегодня собираемся на песчанке в 20:00?",
-     "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"]},
-    {"day": "fri", "time_poll": "16:00", "time_game": "12:00",
-     "question": "Завтра в 12:00 собираемся на песчанке?",
-     "options": ["Да ✅", "Нет ❌"]}
+    {
+        "day": "tue",
+        "time_poll": "08:00",
+        "time_game": "20:00",
+        "question": "Сегодня собираемся на песчанке в 20:00?",
+        "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"],
+    },
+    {
+        "day": "thu",
+        "time_poll": "08:00",
+        "time_game": "20:00",
+        "question": "Сегодня собираемся на песчанке в 20:00?",
+        "options": ["Да ✅", "Нет ❌", "Под вопросом ❔ (отвечу позже)"],
+    },
+    {
+        "day": "fri",
+        "time_poll": "16:00",
+        "time_game": "12:00",
+        "question": "Завтра в 12:00 собираемся на песчанке?",
+        "options": ["Да ✅", "Нет ❌"],
+    },
 ]
 
 WEEKDAY_MAP = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
@@ -213,23 +226,32 @@ async def save_data() -> None:
     global _next_save_allowed
     if time.time() < _next_save_allowed:
         return
-    _next_save_allowed = time.time() + 10
+        _next_save_allowed = time.time() + 10
     try:
-        await _persist_save(DATA_FILE, active_polls, stats, disabled_days, questionable_reminders_enabled)
+        await _persist_save(
+            DATA_FILE,
+            active_polls,
+            stats,
+            disabled_days,
+            questionable_reminders_enabled,
+            low_yes_reminders_enabled,
+        )
         log.debug("Data saved to %s", DATA_FILE)
     except Exception:
         log.exception("Failed to save data")
 
 async def load_data() -> None:
-    global active_polls, stats
+    global active_polls, stats, low_yes_reminders_enabled
     if os.path.exists(DATA_FILE):
         try:
-            ap, st, dd, qrem = await _persist_load(DATA_FILE)
+            ap, st, dd, qrem, lowrem = await _persist_load(DATA_FILE)
             active_polls = ap
             stats = st
-            disabled_days.clear(); disabled_days.update(dd)
+            disabled_days.clear()
+            disabled_days.update(dd)
             global questionable_reminders_enabled
             questionable_reminders_enabled = bool(qrem)
+            low_yes_reminders_enabled = bool(lowrem)
             log.info("Loaded data: active_polls=%s, stats=%s, disabled_days=%s", len(active_polls), len(stats), sorted(list(disabled_days)))
         except Exception:
             log.exception("Failed to load data — starting with empty state")
@@ -254,6 +276,8 @@ def make_backup() -> None:
 async def send_reminder_if_needed(poll_id: str) -> None:
     """Send reminder to CHAT_ID if yes_count < 10 for the poll."""
     try:
+        if not low_yes_reminders_enabled:
+            return
         data = active_polls.get(poll_id)
         if not data or not data.get("active"):
             return
@@ -464,7 +488,7 @@ async def start_poll(poll: Dict[str, Any], from_admin: bool = False) -> None:
             game_dt = KALININGRAD_TZ.localize(game_dt_naive)
         else:
             game_dt = now
-        weather = await _get_weather(game_dt) if poll.get("day") != "tue" else None
+        weather = await _get_weather(game_dt) if poll.get("day") != "manual" else None
         msg = await safe_telegram_call(
             bot.send_poll,
             chat_id=CHAT_ID,
@@ -496,14 +520,6 @@ async def start_poll(poll: Dict[str, Any], from_admin: bool = False) -> None:
         if weather:
             await safe_telegram_call(bot.send_message, CHAT_ID, f"<b>Погода на время игры:</b> {weather}", parse_mode=ParseMode.HTML)
         await safe_telegram_call(bot.send_message, CHAT_ID, "📢 <b>Новый опрос!</b>\nПроголосуйте ☝️", parse_mode=ParseMode.HTML)
-        if poll.get("day") == "tue":
-            await safe_telegram_call(
-                bot.send_message,
-                CHAT_ID,
-                "❗️<b>ФОК • СТАРТ РОВНО В 21:30</b>\n"
-                "Переобуйтесь в сменную обувь в холле <b>ФОКа</b>, а затем заходите в раздевалку.",
-                parse_mode=ParseMode.HTML,
-            )
         if from_admin:
             await safe_telegram_call(bot.send_message, ADMIN_ID, f"✅ Опрос вручную: {poll['question']}")
         log.info("Poll created: %s", poll.get("question"))
@@ -548,25 +564,11 @@ async def send_summary(poll_id: str) -> None:
             )
         else:
             total_yes = len(yes_users)
-            if day == "tue":
-                if total_yes >= 10:
-                    status = (
-                        "✅ <b>Сегодня встречаемся в ФОКе в 21:30!</b>\n"
-                        "⚡️ Приходите вовремя.\n"
-                        "‼️ <b>СМЕНКУ ПЕРЕОДЕВАЕМ В ФОКЕ ПЕРЕД ВХОДОМ В РАЗДЕВАЛКУ!</b>"
-                    )
-                else:
-                    status = (
-                        "⚠️ По голосам меньше 10, но всё равно собираемся в <b>ФОКе</b> в <b>21:30</b>!\n"
-                        "🙏 Надеемся, что ещё подтянутся ребята, чтобы побегать полноценно.\n"
-                        "‼️ <b>СМЕНКУ ПЕРЕОДЕВАЕМ В ФОКЕ ПЕРЕД ВХОДОМ В РАЗДЕВАЛКУ!</b>"
-                    )
-            else:
-                status = (
-                    "⚠️ Сегодня не собираемся — меньше 10 участников."
-                    if total_yes < 10 else
-                    "✅ Сегодня собираемся на песчанке! ⚽"
-                )
+            status = (
+                "⚠️ Сегодня не собираемся — меньше 10 участников."
+                if total_yes < 10
+                else "✅ Сегодня собираемся на песчанке! ⚽"
+            )
         day = data["poll"].get("day", "manual")
         now = now_tz()
         if day != "manual":
@@ -579,7 +581,7 @@ async def send_summary(poll_id: str) -> None:
             game_dt = KALININGRAD_TZ.localize(game_dt_naive)
         else:
             game_dt = now
-        include_weather = data["poll"].get("day") != "tue"
+        include_weather = data["poll"].get("day") != "manual"
         weather = await _get_weather(game_dt) if include_weather else None
         weather_str = ""
         if weather and include_weather:
@@ -590,7 +592,7 @@ async def send_summary(poll_id: str) -> None:
                 weather_str += f"\n\n{weather_msg}"
         # ДОБАВЛЯЕМ блочок капитанов — если Вторник/Четверг и Да >=10
         captains_text = ""
-        if data["poll"].get("day") in ("thu") and len(yes_users) >= 10:
+        if data["poll"].get("day") in ("tue", "thu") and len(yes_users) >= 10:
             captains = random.sample(yes_users, 2)
             captains_text = (
                 f"\n\n🏆 <b>КАПИТАНЫ ВЕЧЕРА:</b>\n"
@@ -743,6 +745,7 @@ async def cmd_commands(message: types.Message) -> None:
             "/notify Текст — оповестить всех 'Да ✅'",
             "/say Текст — отправить сообщение от имени бота",
             "/qreminders on|off — вкл/выкл напоминания для 'Под вопросом'",
+            "/pollreminders on|off — вкл/выкл автонапоминания при &lt;10 'Да'",
             "/duels on|off — вкл/выкл дуэли",
             "/mute [минуты] — замутить пользователя (ответьте на сообщение, укажите минуты)",
             "/unmute — размутить пользователя (ответьте на сообщение)",
@@ -1049,6 +1052,29 @@ async def cmd_qreminders(message: types.Message) -> None:
     await message.reply(
         "Статус: " + ("ВКЛЮЧЕНЫ" if questionable_reminders_enabled else "ВЫКЛЮЧЕНЫ") +
         "\nИспользование: /qreminders on|off"
+    )
+
+
+@dp.message_handler(commands=["pollreminders"])
+async def cmd_pollreminders(message: types.Message) -> None:
+    """Admin-only: включить/выключить автонапоминания при <10 'Да'.
+    Usage: /pollreminders on|off (без аргумента — показать статус)
+    """
+    if not is_admin(message.from_user.id):
+        return await message.reply("❌ Нет прав.")
+    arg = (message.get_args() or "").strip().lower()
+    global low_yes_reminders_enabled
+    if arg in ("on", "вкл", "enable", "+"):
+        low_yes_reminders_enabled = True
+        await save_data()
+        return await message.reply("✅ Автонапоминания при '<10 Да' — ВКЛЮЧЕНЫ.")
+    if arg in ("off", "выкл", "disable", "-"):
+        low_yes_reminders_enabled = False
+        await save_data()
+        return await message.reply("✅ Автонапоминания при '<10 Да' — ВЫКЛЮЧЕНЫ.")
+    await message.reply(
+        "Статус: " + ("ВКЛЮЧЕНЫ" if low_yes_reminders_enabled else "ВЫКЛЮЧЕНЫ") +
+        "\nИспользование: /pollreminders on|off"
     )
 
 @dp.message_handler(commands=["duels"])
